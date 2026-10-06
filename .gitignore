@@ -17,7 +17,8 @@ env/
 
 # Environment files and secrets
 .env
-.env.*
+.env.local
+.env.*.local
 *.pem
 *.key
 
