@@ -34,3 +34,95 @@ CREATE TABLE sample_entity_status_event(
     event_datetime                  TIMESTAMP NOT NULL,
     created_at                      TIMESTAMP NOT NULL DEFAULT(NOW())
 );
+
+
+
+CREATE TABLE customer ( 
+    id SERIAL PRIMARY KEY, 
+    customer_key UUID NOT NULL UNIQUE, 
+    document_number VARCHAR(11) NOT NULL UNIQUE, 
+    email VARCHAR(200) NOT NULL UNIQUE, 
+    name VARCHAR(200) NOT NULL, 
+    birthdate DATE NOT NULL, 
+    created_at TIMESTAMP NOT NULL DEFAULT NOW() 
+); 
+
+CREATE TABLE account ( 
+    id SERIAL PRIMARY KEY, 
+    account_key UUID NOT NULL UNIQUE, 
+    customer_id INTEGER NOT NULL, 
+    balance_cents BIGINT NOT NULL DEFAULT 0, 
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(), 
+    CONSTRAINT fk_account_customer 
+        FOREIGN KEY (customer_id) 
+        REFERENCES customer(id), 
+    CONSTRAINT chk_account_balance 
+        CHECK (balance_cents >= 0) 
+); 
+
+CREATE TABLE bank_transaction ( 
+    id SERIAL PRIMARY KEY, 
+    transaction_key UUID NOT NULL UNIQUE, 
+    idempotency_key VARCHAR(200) NOT NULL UNIQUE, 
+    type VARCHAR(20) NOT NULL, 
+    source_account_id INTEGER, 
+    destination_account_id INTEGER, 
+    amount_cents BIGINT NOT NULL, 
+    fee_cents BIGINT NOT NULL DEFAULT 0, 
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(), 
+    CONSTRAINT fk_transaction_source_account 
+        FOREIGN KEY (source_account_id) 
+        REFERENCES account(id), 
+    CONSTRAINT fk_transaction_destination_account 
+        FOREIGN KEY (destination_account_id) 
+        REFERENCES account(id), 
+    CONSTRAINT chk_transaction_type 
+        CHECK (type IN ('DEPOSIT', 'WITHDRAWAL', 'TRANSFER')), 
+    CONSTRAINT chk_transaction_amount 
+        CHECK (amount_cents > 0), 
+    CONSTRAINT chk_transaction_fee 
+        CHECK (fee_cents >= 0), 
+    CONSTRAINT chk_transaction_accounts 
+        CHECK ( 
+            (type = 'DEPOSIT' 
+                AND source_account_id IS NULL 
+                AND destination_account_id IS NOT NULL) 
+            OR 
+            (type = 'WITHDRAWAL' 
+                AND source_account_id IS NOT NULL 
+                AND destination_account_id IS NULL) 
+            OR 
+            (type = 'TRANSFER' 
+                AND source_account_id IS NOT NULL 
+                AND destination_account_id IS NOT NULL 
+                AND source_account_id <> destination_account_id) 
+        ) 
+); 
+
+CREATE TABLE ledger_entry ( 
+    id BIGSERIAL PRIMARY KEY, 
+    transaction_id INTEGER NOT NULL, 
+    account_id INTEGER NOT NULL, 
+    direction VARCHAR(10) NOT NULL, 
+    kind VARCHAR(20) NOT NULL, 
+    amount_cents BIGINT NOT NULL, 
+    balance_after_cents BIGINT NOT NULL, 
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(), 
+    CONSTRAINT fk_ledger_transaction 
+        FOREIGN KEY (transaction_id) 
+        REFERENCES bank_transaction(id), 
+    CONSTRAINT fk_ledger_account 
+        FOREIGN KEY (account_id) 
+        REFERENCES account(id), 
+    CONSTRAINT chk_ledger_direction 
+        CHECK (direction IN ('DEBIT', 'CREDIT')), 
+    CONSTRAINT chk_ledger_kind 
+        CHECK (kind IN ('PRINCIPAL', 'FEE')), 
+    CONSTRAINT chk_ledger_amount 
+        CHECK (amount_cents > 0), 
+    CONSTRAINT chk_ledger_balance 
+        CHECK (balance_after_cents >= 0) 
+); 
+
+CREATE INDEX idx_ledger_account_id_desc
+ON ledger_entry (account_id, id DESC);

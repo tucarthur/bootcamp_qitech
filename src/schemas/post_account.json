@@ -1,0 +1,15 @@
+{
+    "title": "Post Account",
+    "type": "object",
+    "properties": {
+        "customer_key": {
+            "type": "string",
+            "minLength": 36,
+            "maxLength": 36
+        }
+    },
+    "required": [
+        "customer_key"
+    ],
+    "additionalProperties": false
+}

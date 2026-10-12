@@ -1,0 +1,20 @@
+{
+  "title": "PostDeposit",
+  "type": "object",
+  "properties": {
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "amount_cents": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "required": [
+    "idempotency_key",
+    "amount_cents"
+  ],
+  "additionalProperties": false
+}

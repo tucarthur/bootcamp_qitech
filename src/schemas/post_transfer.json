@@ -1,0 +1,32 @@
+{
+  "title": "PostTransfer",
+  "type": "object",
+  "properties": {
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "source_account_key": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36
+    },
+    "destination_account_key": {
+      "type": "string",
+      "minLength": 36,
+      "maxLength": 36
+    },
+    "amount_cents": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "required": [
+    "idempotency_key",
+    "source_account_key",
+    "destination_account_key",
+    "amount_cents"
+  ],
+  "additionalProperties": false
+}
