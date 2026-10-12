@@ -1,0 +1,21 @@
+{
+  "title": "PostWithdrawal",
+  "type": "object",
+  "properties": {
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "amount_cents": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000000
+    }
+  },
+  "required": [
+    "idempotency_key", 
+    "amount_cents"
+],
+  "additionalProperties": false
+}

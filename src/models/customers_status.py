@@ -2,8 +2,8 @@ from sqlalchemy import Column, Integer, String, DateTime, UniqueConstraint, func
 from models.base import Base
 
 
-class SampleEntityStatus(Base):
-    __tablename__ = "sample_entity_status"
+class CustomersStatus(Base):
+    __tablename__ = "customers_status"
 
     id = Column(Integer, primary_key=True)
     enumerator = Column(String(50), nullable=False)
