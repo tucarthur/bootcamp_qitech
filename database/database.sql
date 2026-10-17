@@ -131,6 +131,7 @@ CREATE TABLE pix_transaction (
     id                              VARCHAR(200) PRIMARY KEY,
     amount                          BIGINT NOT NULL,
     transaction_date                TIMESTAMPTZ NOT NULL,
+    received_at                     TIMESTAMPTZ NOT NULL DEFAULT CLOCK_TIMESTAMP(),
     created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     source_account_branch            VARCHAR(20) NOT NULL,
     source_account_number            VARCHAR(50) NOT NULL,

@@ -3,9 +3,10 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AntifraudPolicy:
-    engine_version: str = "1"
+    engine_version: str = "3"
     timezone: str = "America/Sao_Paulo"
     earth_radius_km: float = 6371.0
+    max_timestamp_difference_minutes: int = 5
 
     hard_ceiling_cents: int = 5_000_000
     night_start_hour: int = 20

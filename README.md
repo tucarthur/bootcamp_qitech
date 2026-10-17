@@ -252,6 +252,10 @@ preenchendo um campo de cada vez para ver a reclamação andar.
 
 #### 7. Registrar uma transação PIX
 
+O `transaction_date` deve estar a menos de cinco minutos do horário atual;
+diferenças de exatamente cinco minutos ou mais são recusadas. Atualize o
+timestamp fixo deste exemplo antes de enviá-lo.
+
 ```bash
 curl -X POST http://localhost:3000/pix/transaction \
   -H "INTERNAL-TOKEN: default_token" \
@@ -287,7 +291,7 @@ curl -X POST http://localhost:3000/pix/transaction \
   "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "1",
+    "engine_version": "3",
     "score": 5,
     "thresholds": {"two_factor": 3, "reject": 8},
     "rules_triggered": [
@@ -321,7 +325,13 @@ curl -X POST http://localhost:3000/pix/transaction \
 
 A API responde **201** com a análise e grava, na mesma transação de banco,
 a transação em `pix_transaction` e a decisão em `pix_analysis`. O `amount`
-é recebido em centavos, sem conversão. Reenviar um `id` já analisado
+é recebido em centavos, sem conversão. `transaction_date` é preservado como
+o horário de evento informado pelo chamador; ele deve diferir em menos de
+5 minutos do horário `received_at`, obtido do relógio do PostgreSQL. Diferenças
+de 5 minutos ou mais são recusadas com **422**. `received_at` serve como
+referência para idades de conta e janelas antifraude.
+O motor coordena análises concorrentes por pagador, dispositivo e destinatário
+com locks transacionais do PostgreSQL. Reenviar um `id` já analisado
 responde **200** com a análise original: a requisição não atualiza nem
 recalcula a decisão.
 
@@ -339,7 +349,7 @@ O resultado da transação acima pode ser consultado com **200**:
   "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "1",
+    "engine_version": "3",
     "score": 5,
     "thresholds": {"two_factor": 3, "reject": 8},
     "rules_triggered": [
@@ -361,9 +371,12 @@ a chave UUID da análise. Uma transação inexistente responde **404**.
 
 #### Como a decisão antifraude é calculada
 
-O motor executa as 12 regras abaixo em ordem fixa, sempre usando a data da
-transação como referência temporal. O histórico só considera transações
-anteriores com data estritamente menor e exclui o próprio `id`. Tentativas
+O motor executa as 12 regras abaixo em ordem fixa. `received_at`, gerado pelo
+PostgreSQL depois da aquisição dos locks, é a referência das janelas de
+histórico, idades de conta e deslocamento; o horário local da regra noturna
+vem de `transaction_date`. Horários de evento a 5 minutos ou mais do recebimento
+são recusados. O histórico só considera recebimentos anteriores
+com `received_at` estritamente menor e exclui o próprio `id`. Tentativas
 incluem decisões rejeitadas; movimentações efetivas não. Valores são
 centavos, documentos são armazenados somente com dígitos (11 para CPF e
 14 para CNPJ), e a hora noturna usa `America/Sao_Paulo`.
@@ -391,6 +404,22 @@ e não disparou não aparece nos metadados. Cada regra disparada inclui
 identificador, pontos, indicação de bloqueio e motivo observado. Qualquer
 bloqueio ou score de pelo menos 8 resulta em `rejected`; score de pelo
 menos 3 resulta em `two_factor_required`; abaixo disso, `approved`.
+
+#### Atualizar um banco já existente
+
+Antes de publicar esta versão em um banco que já contém `pix_transaction`,
+adicione o horário de recebimento. Para registros antigos, `created_at` é a
+melhor aproximação disponível:
+
+```sql
+ALTER TABLE pix_transaction ADD COLUMN received_at TIMESTAMPTZ;
+UPDATE pix_transaction SET received_at = created_at WHERE received_at IS NULL;
+ALTER TABLE pix_transaction
+    ALTER COLUMN received_at SET DEFAULT CLOCK_TIMESTAMP(),
+    ALTER COLUMN received_at SET NOT NULL;
+```
+
+O `database/database.sql` já cria a coluna para bancos novos.
 
 E existe uma fronteira aqui que vale a pena enxergar cedo. Mande um CPF
 com o formato certo e os dígitos errados:

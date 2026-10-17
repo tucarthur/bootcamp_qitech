@@ -12,6 +12,7 @@ class TransactionData:
     id: str
     amount: int
     transaction_date: datetime
+    received_at: datetime
     source_document_number: str
     source_account_opening_date: datetime
     destination_document_number: str
@@ -27,15 +28,15 @@ def analyze(
     history: list[TransactionData],
     policy: AntifraudPolicy,
 ) -> dict:
-    now = transaction.transaction_date
+    now = transaction.received_at
     if now.utcoffset() is None:
-        raise ValueError("transaction_date must be timezone-aware")
-    if any(item.transaction_date.utcoffset() is None for item in history):
-        raise ValueError("history transaction_date values must be timezone-aware")
+        raise ValueError("received_at must be timezone-aware")
+    if any(item.received_at.utcoffset() is None for item in history):
+        raise ValueError("history received_at values must be timezone-aware")
     prior = [
         item
         for item in history
-        if item.id != transaction.id and item.transaction_date < now
+        if item.id != transaction.id and item.received_at < now
     ]
     score = 0
     blocked = False
@@ -55,7 +56,7 @@ def analyze(
         skipped.append({"rule": rule, "reason": reason})
 
     def in_window(item: TransactionData, window: timedelta) -> bool:
-        return now - window <= item.transaction_date < now
+        return now - window <= item.received_at < now
 
     def effective(item: TransactionData) -> bool:
         return item.status != "rejected"
@@ -66,7 +67,7 @@ def analyze(
     ]
     recent_attempts_10m = [
         item for item in payer_attempts
-        if now - timedelta(minutes=policy.burst_window_minutes) < item.transaction_date
+        if now - timedelta(minutes=policy.burst_window_minutes) < item.received_at
     ]
 
     if transaction.amount > policy.hard_ceiling_cents:
@@ -77,7 +78,7 @@ def analyze(
             f"Valor observado de {transaction.amount} centavos acima do limite de {policy.hard_ceiling_cents}.",
         )
 
-    local_hour = now.astimezone(ZoneInfo(policy.timezone)).hour
+    local_hour = transaction.transaction_date.astimezone(ZoneInfo(policy.timezone)).hour
     if (
         len(transaction.source_document_number) == policy.cpf_digits
         and (local_hour >= policy.night_start_hour or local_hour < policy.night_end_hour)
@@ -135,7 +136,7 @@ def analyze(
             for item in payer_attempts
             if effective(item) and in_window(item, median_window)
         ),
-        key=lambda item: (item.transaction_date, item.id),
+        key=lambda item: (item.received_at, item.id),
         reverse=True,
     )[: policy.amount_median_max_samples]
     median_samples = [item.amount for item in median_history]
@@ -208,7 +209,7 @@ def analyze(
     elif transaction.source_latitude is not None and transaction.source_longitude is not None:
         latest_geo = max(
             geo_history,
-            key=lambda item: (item.transaction_date, item.id),
+            key=lambda item: (item.received_at, item.id),
         )
         distance = _distance_km(
             float(latest_geo.source_latitude),
@@ -218,7 +219,7 @@ def analyze(
             policy.earth_radius_km,
         )
         elapsed_seconds = max(
-            (now - latest_geo.transaction_date).total_seconds(),
+            (now - latest_geo.received_at).total_seconds(),
             policy.impossible_travel_min_elapsed_seconds,
         )
         speed = distance / (elapsed_seconds / 3600)

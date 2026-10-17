@@ -10,6 +10,11 @@ class PixTransaction(Base):
 
     amount = Column(BigInteger, nullable=False)
     transaction_date = Column(DateTime(timezone=True), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+    )
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     source_account_branch = Column(String(20), nullable=False)

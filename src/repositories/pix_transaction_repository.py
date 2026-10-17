@@ -4,7 +4,7 @@ from decimal import Decimal
 from database import Context
 from models import PixTransaction
 from models.pix_transaction_analysis import PixTransactionAnalysis
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, text
 
 from controllers.antifraud import POLICY, TransactionData
 
@@ -16,12 +16,36 @@ class PixTransactionRepository:
     def get_by_id(self, transaction_id: str) -> PixTransaction | None:
         return self.session.query(PixTransaction).filter(PixTransaction.id == transaction_id).first()
 
+    def lock_for_analysis(
+        self,
+        transaction_id: str,
+        source_document_number: str,
+        source_device_id: str,
+        destination_document_number: str,
+    ) -> None:
+        source_document_number = self._normalize_document(source_document_number)
+        destination_document_number = self._normalize_document(destination_document_number)
+        lock_keys = {
+            f"pix-antifraud:transaction:{transaction_id}",
+            f"pix-antifraud:payer:{source_document_number}",
+            f"pix-antifraud:device:{source_device_id}",
+            f"pix-antifraud:payee:{destination_document_number}",
+        }
+        for lock_key in sorted(lock_keys):
+            self.session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtextextended(:lock_key, 0))"),
+                {"lock_key": lock_key},
+            )
+
+    def get_database_timestamp(self) -> datetime:
+        return self.session.execute(text("SELECT clock_timestamp()")).scalar_one()
+
     def get_history_for_analysis(self, transaction: TransactionData) -> list[TransactionData]:
-        history_cutoff = transaction.transaction_date - timedelta(
+        history_cutoff = transaction.received_at - timedelta(
             days=POLICY.amount_median_window_days
         )
         recent_history = and_(
-            PixTransaction.transaction_date >= history_cutoff,
+            PixTransaction.received_at >= history_cutoff,
             or_(
                 PixTransaction.source_document_number == transaction.source_document_number,
                 PixTransaction.source_device_id == transaction.source_device_id,
@@ -42,10 +66,10 @@ class PixTransactionRepository:
             )
             .filter(
                 PixTransaction.id != transaction.id,
-                PixTransaction.transaction_date < transaction.transaction_date,
+                PixTransaction.received_at < transaction.received_at,
                 or_(recent_history, all_time_payee_history),
             )
-            .order_by(PixTransaction.transaction_date.desc())
+            .order_by(PixTransaction.received_at.desc())
             .order_by(PixTransaction.id.desc())
             .all()
         )
@@ -58,6 +82,7 @@ class PixTransactionRepository:
         self,
         payload: dict,
         transaction_date: datetime,
+        received_at: datetime,
         source_account_opening_date: datetime,
         destination_account_opening_date: datetime,
     ) -> PixTransaction:
@@ -69,6 +94,7 @@ class PixTransactionRepository:
             id=payload["id"],
             amount=payload["amount"],
             transaction_date=transaction_date,
+            received_at=received_at,
             source_account_branch=source_account["branch"],
             source_account_number=source_account["account_number"],
             source_account_opening_date=source_account_opening_date,
@@ -98,6 +124,7 @@ class PixTransactionRepository:
             id=transaction.id,
             amount=transaction.amount,
             transaction_date=transaction.transaction_date,
+            received_at=transaction.received_at,
             source_document_number=transaction.source_document_number,
             source_account_opening_date=transaction.source_account_opening_date,
             destination_document_number=transaction.destination_document_number,
@@ -116,6 +143,7 @@ class PixTransactionRepository:
     def from_payload(
         payload: dict,
         transaction_date: datetime,
+        received_at: datetime,
         source_account_opening_date: datetime,
         destination_account_opening_date: datetime,
     ) -> TransactionData:
@@ -126,6 +154,7 @@ class PixTransactionRepository:
             id=payload["id"],
             amount=payload["amount"],
             transaction_date=transaction_date,
+            received_at=received_at,
             source_document_number=PixTransactionRepository._normalize_document(
                 source_account["owner"]["document_number"]
             ),

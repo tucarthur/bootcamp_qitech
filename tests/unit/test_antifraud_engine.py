@@ -1,7 +1,11 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from controllers.antifraud import POLICY, TransactionData, analyze
+from controllers.pix_transaction_controller import PixTransactionController
+from errors import PixTransactionTimestampOutsideAllowedWindow
 
 
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=timezone(timedelta(hours=-3)))
@@ -21,6 +25,7 @@ def transaction(**overrides) -> TransactionData:
         "source_longitude": -46.65,
     }
     values.update(overrides)
+    values.setdefault("received_at", values["transaction_date"])
     return TransactionData(**values)
 
 
@@ -122,6 +127,43 @@ def test_burst_has_exclusive_step_and_rejection_tiers():
 
     cutoff_only = analyze(transaction(), [previous(minutes=10)], POLICY)
     assert "burst" not in triggered(cutoff_only)
+
+
+def test_velocity_windows_use_receipt_time_not_caller_event_time():
+    current = transaction(
+        transaction_date=NOW - timedelta(days=365),
+        received_at=NOW,
+    )
+    history = [
+        previous(
+            minutes=index + 1,
+            transaction_date=NOW - timedelta(days=366, minutes=index + 1),
+            received_at=NOW - timedelta(minutes=index + 1),
+        )
+        for index in range(4)
+    ]
+
+    result = analyze(current, history, POLICY)
+
+    assert triggered(result)["burst"]["points"] == POLICY.burst_points
+
+
+def test_timestamp_skew_rejects_at_five_minutes_and_accepts_below():
+    received_at = NOW
+
+    PixTransactionController._validate_timestamp_skew(
+        received_at + timedelta(minutes=5) - timedelta(microseconds=1),
+        received_at,
+    )
+    PixTransactionController._validate_timestamp_skew(
+        received_at - timedelta(minutes=5) + timedelta(microseconds=1),
+        received_at,
+    )
+
+    for event_time in (received_at + timedelta(minutes=5), received_at - timedelta(minutes=5)):
+        with pytest.raises(PixTransactionTimestampOutsideAllowedWindow) as error:
+            PixTransactionController._validate_timestamp_skew(event_time, received_at)
+        assert error.value.code == "QIT001010"
 
 
 def test_rolling_total_excludes_rejected_and_uses_strict_thresholds():

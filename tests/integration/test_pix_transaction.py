@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from sqlalchemy import create_engine, text
@@ -12,7 +14,7 @@ def pix_transaction_payload() -> dict:
     return {
         "id": f"pix-{uuid4()}",
         "amount": 150000,
-        "transaction_date": "2026-10-17T22:15:00-03:00",
+        "transaction_date": datetime.now(timezone.utc).isoformat(),
         "source_account": {
             "branch": "0001",
             "account_number": "88213",
@@ -28,7 +30,9 @@ def pix_transaction_payload() -> dict:
             "participant": "60701190",
             "branch": "3675",
             "account_number": "10442",
-            "opening_date": "2026-10-10T09:00:00-03:00",
+            "opening_date": (
+                datetime.now(timezone.utc) - timedelta(days=8)
+            ).isoformat(),
             "owner": {
                 "document_number": (
                     f"{payee_digits[:3]}.{payee_digits[3:6]}."
@@ -53,11 +57,10 @@ class TestPixTransactionCreate:
 
         assert status == 201
         assert response["status"] == "two_factor_required"
-        assert response["metadata"]["engine_version"] == "1"
-        assert response["metadata"]["score"] == 5
+        assert response["metadata"]["engine_version"] == "3"
+        assert response["metadata"]["score"] == 3
         assert response["metadata"]["thresholds"] == {"two_factor": 3, "reject": 8}
         assert [item["rule"] for item in response["metadata"]["rules_triggered"]] == [
-            "night_over_limit",
             "young_destination",
             "new_payee",
         ]
@@ -74,9 +77,21 @@ class TestPixTransactionCreate:
                     ),
                     {"transaction_id": payload["id"]},
                 ).one()
+                timestamps = connection.execute(
+                    text(
+                        """
+                        SELECT transaction_date, received_at
+                        FROM pix_transaction
+                        WHERE id = :transaction_id
+                        """
+                    ),
+                    {"transaction_id": payload["id"]},
+                ).one()
         finally:
             engine.dispose()
         assert counts == (1, 1)
+        assert timestamps.received_at.utcoffset() is not None
+        assert timestamps.received_at != timestamps.transaction_date
 
     def test_replay_returns_same_analysis_without_reprocessing(self):
         payload = pix_transaction_payload()
@@ -88,6 +103,36 @@ class TestPixTransactionCreate:
 
         assert status == 200
         assert second_response == first_response
+
+    def test_concurrent_transactions_serialize_shared_payer_history(self):
+        first = pix_transaction_payload()
+        payer_document = first["source_account"]["owner"]["document_number"]
+        device_id = first["source"]["device_id"]
+        payloads = []
+        for _ in range(10):
+            payload = pix_transaction_payload()
+            payload["amount"] = 1_000
+            payload["source_account"]["owner"]["document_number"] = payer_document
+            payload["source"]["device_id"] = device_id
+            payloads.append(payload)
+
+        with ThreadPoolExecutor(max_workers=len(payloads)) as executor:
+            responses = list(executor.map(RequestGenerator.POST_pix_transaction, payloads))
+
+        assert all(status == 201 for status, _response in responses)
+        statuses = sorted(response["status"] for _status, response in responses)
+        assert statuses == [
+            "approved",
+            "approved",
+            "approved",
+            "approved",
+            "rejected",
+            "two_factor_required",
+            "two_factor_required",
+            "two_factor_required",
+            "two_factor_required",
+            "two_factor_required",
+        ]
 
     def test_refuses_invalid_nested_payload(self):
         payload = pix_transaction_payload()
@@ -106,6 +151,18 @@ class TestPixTransactionCreate:
 
         assert status == 422
         assert response["code"] == "QIT001009"
+
+    def test_refuses_event_timestamp_more_than_five_minutes_from_receipt(self):
+        for offset in (timedelta(minutes=-6), timedelta(minutes=6)):
+            payload = pix_transaction_payload()
+            payload["transaction_date"] = (
+                datetime.now(timezone.utc) + offset
+            ).isoformat()
+
+            status, response = RequestGenerator.POST_pix_transaction(payload)
+
+            assert status == 422
+            assert response["code"] == "QIT001010"
 
     def test_missing_analysis_is_not_found(self):
         status, response = RequestGenerator.GET_pix_transaction(f"missing-{uuid4()}")
