@@ -1,6 +1,28 @@
 from errors import QIException
 
 
+class DuplicatePixTransaction(QIException):
+    code = "QIT001008"
+
+    def __init__(self, transaction_id) -> None:
+        title = "PIX transaction already registered"
+        http_status = 409
+        description = f"There is already a PIX transaction with id {transaction_id}."
+        translation = "Já existe uma transação PIX com este identificador."
+        super().__init__(title, self.code, http_status, description, translation)
+
+
+class InvalidPixTransactionTimestamp(QIException):
+    code = "QIT001009"
+
+    def __init__(self, field_name, value) -> None:
+        title = "Invalid PIX transaction timestamp"
+        http_status = 422
+        description = f"The value '{value}' for {field_name} is not a valid timezone-aware timestamp."
+        translation = "Uma das datas da transação PIX é inválida."
+        super().__init__(title, self.code, http_status, description, translation)
+
+
 class NotFoundSampleEntity(QIException):
     code = "QIT001001"
 

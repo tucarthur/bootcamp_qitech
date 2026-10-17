@@ -1,0 +1,18 @@
+from fastapi import status as http_status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
+
+from controllers import PixTransactionController
+from utils.schema_handler import SchemaHandler
+
+
+class PixTransactionResource:
+    @SchemaHandler.validate("post_pix_transaction.json")
+    def on_post(self, payload: dict) -> JSONResponse:
+        controller = PixTransactionController()
+        transaction = controller.create(payload)
+
+        return JSONResponse(
+            content=jsonable_encoder(transaction),
+            status_code=http_status.HTTP_201_CREATED,
+        )

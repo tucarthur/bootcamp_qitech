@@ -126,3 +126,48 @@ CREATE TABLE ledger_entry (
 
 CREATE INDEX idx_ledger_account_id_desc
 ON ledger_entry (account_id, id DESC);
+
+CREATE TABLE pix_transaction (
+    id                              VARCHAR(200) PRIMARY KEY,
+    amount                          BIGINT NOT NULL,
+    transaction_date                TIMESTAMPTZ NOT NULL,
+    created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    source_account_branch            VARCHAR(20) NOT NULL,
+    source_account_number            VARCHAR(50) NOT NULL,
+    source_account_opening_date      TIMESTAMPTZ NOT NULL,
+    source_document_number           VARCHAR(14) NOT NULL,
+    destination_participant          VARCHAR(20) NOT NULL,
+    destination_account_branch       VARCHAR(20) NOT NULL,
+    destination_account_number       VARCHAR(50) NOT NULL,
+    destination_account_opening_date TIMESTAMPTZ NOT NULL,
+    destination_document_number      VARCHAR(14) NOT NULL,
+    source_device_id                 VARCHAR(200) NOT NULL,
+    source_channel                   VARCHAR(50) NOT NULL,
+    source_ip                        VARCHAR(45) NOT NULL,
+    source_latitude                  NUMERIC(10, 7) NOT NULL,
+    source_longitude                 NUMERIC(10, 7) NOT NULL,
+    CONSTRAINT chk_pix_transaction_amount CHECK (amount > 0),
+    CONSTRAINT chk_pix_transaction_latitude CHECK (source_latitude BETWEEN -90 AND 90),
+    CONSTRAINT chk_pix_transaction_longitude CHECK (source_longitude BETWEEN -180 AND 180)
+);
+
+CREATE INDEX idx_pix_transaction_source_account
+ON pix_transaction (source_account_branch, source_account_number);
+
+CREATE INDEX idx_pix_transaction_destination_account
+ON pix_transaction (destination_participant, destination_account_branch, destination_account_number);
+
+CREATE INDEX idx_pix_transaction_device_id
+ON pix_transaction (source_device_id);
+
+CREATE INDEX idx_pix_transaction_source_document_number
+ON pix_transaction (source_document_number);
+
+CREATE INDEX idx_pix_transaction_destination_document_number
+ON pix_transaction (destination_document_number);
+
+CREATE INDEX idx_pix_transaction_source_ip
+ON pix_transaction (source_ip);
+
+CREATE INDEX idx_pix_transaction_transaction_date
+ON pix_transaction (transaction_date);

@@ -250,6 +250,46 @@ Repare que ele reclamou de **um** campo, e você deixou cinco de fora. É
 assim mesmo: a validação para no primeiro problema. Tire o `{}` e vá
 preenchendo um campo de cada vez para ver a reclamação andar.
 
+#### 7. Registrar uma transação PIX
+
+```bash
+curl -X POST http://localhost:3000/pix/transaction \
+  -H "INTERNAL-TOKEN: default_token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "pix-000123",
+    "amount": 150000,
+    "transaction_date": "2026-10-17T22:15:00-03:00",
+    "source_account": {
+      "branch": "0001",
+      "account_number": "88213",
+      "opening_date": "2025-03-02T10:00:00-03:00",
+      "owner": {"document_number": "123.456.789-09"}
+    },
+    "destination_account": {
+      "participant": "60701190",
+      "branch": "3675",
+      "account_number": "10442",
+      "opening_date": "2026-10-10T09:00:00-03:00",
+      "owner": {"document_number": "987.654.321-00"}
+    },
+    "source": {
+      "device_id": "dvc-9f2c71a8",
+      "channel": "app",
+      "ip": "198.51.100.23",
+      "geolocation": {"latitude": -23.56, "longitude": -46.65}
+    }
+  }'
+```
+
+```json
+{"id":"pix-000123"}
+```
+
+A API responde **201** e grava os campos recebidos em `pix_transaction`.
+O `id` é único; enviar outra transação com o mesmo identificador responde
+**409**. O `amount` é armazenado como recebido, sem conversão de unidade.
+
 E existe uma fronteira aqui que vale a pena enxergar cedo. Mande um CPF
 com o formato certo e os dígitos errados:
 
@@ -343,19 +383,20 @@ lições de segurança que cabem em cinco linhas.
 
 ### Todas as rotas
 
-Sete endereços — este é o mapa inteiro da API:
+Oito endereços — este é o mapa inteiro da API:
 
 | Método e rota | O que faz | Responde |
 |---|---|---|
 | `GET /` | diz qual serviço é este | `200` + nome e id |
 | `GET /health_check` | diz se a API está de pé | `204`, sem corpo |
+| `POST /pix/transaction` | registra uma transação PIX | `201` + o `id` |
 | `POST /sample_entity` | cria uma entidade | `201` + o `sample_entity_key` |
 | `GET /sample_entity/{key}` | busca uma entidade | `200` + a entidade |
 | `GET /sample_entities` | lista, de dez em dez, com filtros | `200` + a página |
 | `PUT /sample_entity/{key}` | muda o status (`success` ou `failed`) | `202` + o `sample_entity_key` |
 | `PUT /webhook/sample_entity/{key}/increment_counter` | soma 1 no contador | `204`, sem corpo |
 
-As cinco de baixo exigem o `INTERNAL-TOKEN` (seção 6). As duas de cima
+As seis de baixo exigem o `INTERNAL-TOKEN` (seção 6). As duas de cima
 são abertas — a primeira você já usou: foi ela que respondeu no
 navegador.
 

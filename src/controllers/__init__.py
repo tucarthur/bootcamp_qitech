@@ -1,1 +1,2 @@
+from controllers.pix_transaction_controller import PixTransactionController
 from controllers.sample_entity_controller import SampleEntityController
