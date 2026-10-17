@@ -365,3 +365,137 @@ def test_shared_device_counts_distinct_documents_and_self_payment_skips_rules():
         "new_payee",
         "mule_fan_in",
     }.intersection(triggered(self_result))
+
+
+def test_obvious_low_risk_transaction_is_approved():
+    result = analyze(transaction(), [], POLICY)
+
+    assert result["status"] == "approved"
+    assert result["metadata"]["score"] == 0
+    assert result["metadata"]["rules_triggered"] == []
+
+
+def test_rejected_history_does_not_inflate_effective_total():
+    history = [previous(amount=POLICY.rolling_24h_reject_cents, status="rejected")]
+
+    result = analyze(transaction(amount=1_000), history, POLICY)
+
+    assert result["status"] == "approved"
+    assert "rolling_24h_total" not in triggered(result)
+
+
+def test_out_of_window_history_does_not_trigger_burst_or_rolling_total():
+    old = previous(
+        amount=POLICY.rolling_24h_reject_cents,
+        received_at=NOW - timedelta(hours=POLICY.rolling_24h_window_hours, seconds=1),
+        transaction_date=NOW - timedelta(hours=POLICY.rolling_24h_window_hours, seconds=1),
+    )
+
+    result = analyze(transaction(), [old], POLICY)
+
+    assert result["status"] == "approved"
+    assert not {"burst", "rolling_24h_total"}.intersection(triggered(result))
+
+
+def test_amount_above_hard_ceiling_is_rejected():
+    result = analyze(
+        transaction(amount=POLICY.hard_ceiling_cents + 1),
+        [],
+        POLICY,
+    )
+
+    assert result["status"] == "rejected"
+    assert triggered(result)["hard_ceiling"]["block"] is True
+
+
+def test_tenth_recent_payer_attempt_is_rejected():
+    history = [previous(minutes=index + 1) for index in range(POLICY.burst_reject_count - 1)]
+
+    result = analyze(transaction(), history, POLICY)
+
+    assert result["status"] == "rejected"
+    assert triggered(result)["burst"]["block"] is True
+
+
+def test_effective_rolling_total_above_reject_limit_is_rejected():
+    history = [previous(amount=POLICY.rolling_24h_reject_cents)]
+
+    result = analyze(transaction(), history, POLICY)
+
+    assert result["status"] == "rejected"
+    assert triggered(result)["rolling_24h_total"]["block"] is True
+
+
+def test_fifth_recent_payer_attempt_requires_two_factor():
+    history = [previous(minutes=index + 1) for index in range(POLICY.burst_two_factor_count - 1)]
+
+    result = analyze(transaction(), history, POLICY)
+
+    assert result["status"] == "two_factor_required"
+    assert triggered(result)["burst"]["points"] == POLICY.burst_points
+
+
+def test_rolling_total_above_two_factor_limit_requires_two_factor():
+    result = analyze(
+        transaction(amount=POLICY.rolling_24h_two_factor_cents + 1),
+        [],
+        POLICY,
+    )
+
+    assert result["status"] == "two_factor_required"
+    assert triggered(result)["rolling_24h_total"]["points"] == POLICY.rolling_24h_points
+
+
+def test_new_device_and_first_payee_require_two_factor():
+    history = [
+        previous(
+            minutes=index + 1,
+            amount=1_000,
+            source_device_id=f"old-device-{index}",
+            destination_document_number=f"{index + 1:011d}",
+        )
+        for index in range(POLICY.new_device_min_attempts)
+    ]
+
+    result = analyze(
+        transaction(amount=POLICY.new_payee_min_cents),
+        history,
+        POLICY,
+    )
+
+    assert result["status"] == "two_factor_required"
+    assert {"new_device", "new_payee"} <= set(triggered(result))
+
+
+def test_distinct_payers_funneling_to_one_cpf_require_two_factor():
+    destination = "98765432100"
+    history = [
+        previous(
+            minutes=index + 1,
+            source_document_number=f"{index + 1:011d}",
+            destination_document_number=destination,
+        )
+        for index in range(POLICY.mule_fan_in_two_factor_count - 1)
+    ]
+
+    result = analyze(transaction(destination_document_number=destination), history, POLICY)
+
+    assert result["status"] == "two_factor_required"
+    assert triggered(result)["mule_fan_in"]["points"] == POLICY.mule_fan_in_points
+
+
+def test_shared_device_used_by_three_payers_requires_two_factor():
+    history = [
+        previous(
+            minutes=index + 1,
+            source_document_number=f"{index + 1:011d}",
+            source_device_id="current-device",
+            destination_document_number="11111111111",
+        )
+        for index in range(POLICY.shared_device_min_documents - 1)
+    ]
+
+    result = analyze(transaction(), history, POLICY)
+
+    assert result["status"] == "two_factor_required"
+    assert triggered(result)["shared_device"]["points"] == POLICY.shared_device_points
