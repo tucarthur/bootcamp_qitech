@@ -121,7 +121,7 @@
           "additionalProperties": false
         }
       },
-      "required": ["device_id", "channel", "ip", "geolocation"],
+      "required": ["device_id", "channel", "ip"],
       "additionalProperties": false
     }
   },

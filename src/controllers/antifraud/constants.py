@@ -3,32 +3,42 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class AntifraudPolicy:
-    engine_version: str = "3"
+    engine_version: str = "4"
     timezone: str = "America/Sao_Paulo"
     earth_radius_km: float = 6371.0
-    max_timestamp_difference_minutes: int = 5
 
-    hard_ceiling_cents: int = 5_000_000
+    high_value_review_amount_cents: int = 5_000_000
+    destination_cpf_amount_cents: int = 1_000_000
+    destination_cnpj_amount_cents: int = 5_000_000
+    destination_cpf_points: int = 3
+    destination_cnpj_points: int = 2
+
     night_start_hour: int = 20
     night_end_hour: int = 6
     night_amount_cents: int = 100_000
     night_points: int = 2
 
     burst_window_minutes: int = 10
-    burst_reject_count: int = 10
-    burst_two_factor_count: int = 5
+    burst_cpf_reject_count: int = 10
+    burst_cpf_two_factor_count: int = 5
+    burst_cnpj_reject_count: int = 40
+    burst_cnpj_two_factor_count: int = 20
     burst_points: int = 3
 
     rolling_24h_window_hours: int = 24
-    rolling_24h_reject_cents: int = 3_000_000
-    rolling_24h_two_factor_cents: int = 1_000_000
+    rolling_24h_cpf_reject_cents: int = 3_000_000
+    rolling_24h_cpf_two_factor_cents: int = 1_000_000
+    rolling_24h_cnpj_reject_cents: int = 15_000_000
+    rolling_24h_cnpj_two_factor_cents: int = 5_000_000
     rolling_24h_points: int = 2
 
     amount_median_window_days: int = 90
     amount_median_max_samples: int = 50
     amount_median_min_samples: int = 5
-    amount_median_multiplier: int = 5
     amount_median_min_cents: int = 50_000
+    amount_median_robust_z_threshold: float = 3.0
+    amount_median_mad_scale: float = 1.4826
+    amount_median_scale_floor_cents: int = 1_000
     amount_median_points: int = 2
 
     new_device_window_days: int = 90

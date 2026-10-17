@@ -1,4 +1,13 @@
-from sqlalchemy import BigInteger, CheckConstraint, Column, DateTime, Numeric, String, func
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    Column,
+    DateTime,
+    Index,
+    Numeric,
+    String,
+    func,
+)
 
 from models.base import Base
 
@@ -31,8 +40,8 @@ class PixTransaction(Base):
     source_device_id = Column(String(200), nullable=False)
     source_channel = Column(String(50), nullable=False)
     source_ip = Column(String(45), nullable=False)
-    source_latitude = Column(Numeric(10, 7), nullable=False)
-    source_longitude = Column(Numeric(10, 7), nullable=False)
+    source_latitude = Column(Numeric(10, 7), nullable=True)
+    source_longitude = Column(Numeric(10, 7), nullable=True)
 
     __table_args__ = (
         CheckConstraint("amount > 0", name="chk_pix_transaction_amount"),
@@ -43,5 +52,25 @@ class PixTransaction(Base):
         CheckConstraint(
             "source_longitude >= -180 AND source_longitude <= 180",
             name="chk_pix_transaction_longitude",
+        ),
+        Index(
+            "idx_pix_transaction_source_document_date",
+            "source_document_number",
+            "transaction_date",
+        ),
+        Index(
+            "idx_pix_transaction_destination_document_date",
+            "destination_document_number",
+            "transaction_date",
+        ),
+        Index(
+            "idx_pix_transaction_payer_payee",
+            "source_document_number",
+            "destination_document_number",
+        ),
+        Index(
+            "idx_pix_transaction_device_date",
+            "source_device_id",
+            "transaction_date",
         ),
     )

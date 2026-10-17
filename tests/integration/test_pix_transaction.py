@@ -57,9 +57,13 @@ class TestPixTransactionCreate:
 
         assert status == 201
         assert response["status"] == "two_factor_required"
-        assert response["metadata"]["engine_version"] == "3"
+        assert response["metadata"]["engine_version"] == "4"
         assert response["metadata"]["score"] == 3
-        assert response["metadata"]["thresholds"] == {"two_factor": 3, "reject": 8}
+        assert response["metadata"]["thresholds"] == {
+            "two_factor": 3,
+            "reject": 8,
+            "high_value_review_amount": 5_000_000,
+        }
         assert [item["rule"] for item in response["metadata"]["rules_triggered"]] == [
             "young_destination",
             "new_payee",
@@ -120,19 +124,45 @@ class TestPixTransactionCreate:
             responses = list(executor.map(RequestGenerator.POST_pix_transaction, payloads))
 
         assert all(status == 201 for status, _response in responses)
-        statuses = sorted(response["status"] for _status, response in responses)
-        assert statuses == [
-            "approved",
-            "approved",
-            "approved",
-            "approved",
-            "rejected",
-            "two_factor_required",
-            "two_factor_required",
-            "two_factor_required",
-            "two_factor_required",
-            "two_factor_required",
-        ]
+        response_by_id = {
+            payload["id"]: response["status"]
+            for payload, (_status, response) in zip(payloads, responses)
+        }
+        engine = create_engine(DbUtils.database_url())
+        try:
+            with engine.connect() as connection:
+                rows = connection.execute(
+                    text(
+                        """
+                        SELECT t.id, t.transaction_date, t.received_at, a.status
+                        FROM pix_transaction t
+                        JOIN pix_analysis a ON a.transaction_id = t.id
+                        WHERE t.id = ANY(:transaction_ids)
+                        ORDER BY t.received_at, t.id
+                        """
+                    ),
+                    {"transaction_ids": [payload["id"] for payload in payloads]},
+                ).all()
+        finally:
+            engine.dispose()
+
+        prior_event_dates = []
+        for row in rows:
+            recent_prior_count = sum(
+                row.transaction_date - timedelta(minutes=10) < event_date < row.transaction_date
+                for event_date in prior_event_dates
+            )
+            attempt_count = recent_prior_count + 1
+            expected_status = (
+                "rejected"
+                if attempt_count >= 10
+                else "two_factor_required"
+                if attempt_count >= 5
+                else "approved"
+            )
+            assert row.status == expected_status
+            assert response_by_id[row.id] == expected_status
+            prior_event_dates.append(row.transaction_date)
 
     def test_refuses_invalid_nested_payload(self):
         payload = pix_transaction_payload()
@@ -143,6 +173,18 @@ class TestPixTransactionCreate:
         assert status == 400
         assert response["code"] == "QIT000001"
 
+    def test_geolocation_is_optional_and_travel_rule_is_skipped(self):
+        payload = pix_transaction_payload()
+        del payload["source"]["geolocation"]
+
+        status, response = RequestGenerator.POST_pix_transaction(payload)
+
+        assert status == 201
+        assert any(
+            item["rule"] == "impossible_travel"
+            for item in response["metadata"]["rules_skipped"]
+        )
+
     def test_refuses_impossible_timestamp(self):
         payload = pix_transaction_payload()
         payload["transaction_date"] = "2026-02-30T10:00:00-03:00"
@@ -152,7 +194,7 @@ class TestPixTransactionCreate:
         assert status == 422
         assert response["code"] == "QIT001009"
 
-    def test_refuses_event_timestamp_more_than_five_minutes_from_receipt(self):
+    def test_accepts_event_timestamp_outside_previous_five_minute_limit(self):
         for offset in (timedelta(minutes=-6), timedelta(minutes=6)):
             payload = pix_transaction_payload()
             payload["transaction_date"] = (
@@ -161,8 +203,12 @@ class TestPixTransactionCreate:
 
             status, response = RequestGenerator.POST_pix_transaction(payload)
 
-            assert status == 422
-            assert response["code"] == "QIT001010"
+            assert status == 201
+            assert response["status"] in {
+                "approved",
+                "two_factor_required",
+                "rejected",
+            }
 
     def test_missing_analysis_is_not_found(self):
         status, response = RequestGenerator.GET_pix_transaction(f"missing-{uuid4()}")

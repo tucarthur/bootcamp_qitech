@@ -41,11 +41,11 @@ class PixTransactionRepository:
         return self.session.execute(text("SELECT clock_timestamp()")).scalar_one()
 
     def get_history_for_analysis(self, transaction: TransactionData) -> list[TransactionData]:
-        history_cutoff = transaction.received_at - timedelta(
+        history_cutoff = transaction.transaction_date - timedelta(
             days=POLICY.amount_median_window_days
         )
         recent_history = and_(
-            PixTransaction.received_at >= history_cutoff,
+            PixTransaction.transaction_date >= history_cutoff,
             or_(
                 PixTransaction.source_document_number == transaction.source_document_number,
                 PixTransaction.source_device_id == transaction.source_device_id,
@@ -66,10 +66,10 @@ class PixTransactionRepository:
             )
             .filter(
                 PixTransaction.id != transaction.id,
-                PixTransaction.received_at < transaction.received_at,
+                PixTransaction.transaction_date < transaction.transaction_date,
                 or_(recent_history, all_time_payee_history),
             )
-            .order_by(PixTransaction.received_at.desc())
+            .order_by(PixTransaction.transaction_date.desc())
             .order_by(PixTransaction.id.desc())
             .all()
         )
@@ -89,6 +89,7 @@ class PixTransactionRepository:
         source_account = payload["source_account"]
         destination_account = payload["destination_account"]
         source = payload["source"]
+        geolocation = source.get("geolocation")
 
         transaction = PixTransaction(
             id=payload["id"],
@@ -111,8 +112,12 @@ class PixTransactionRepository:
             source_device_id=source["device_id"],
             source_channel=source["channel"],
             source_ip=source["ip"],
-            source_latitude=Decimal(str(source["geolocation"]["latitude"])),
-            source_longitude=Decimal(str(source["geolocation"]["longitude"])),
+            source_latitude=Decimal(str(geolocation["latitude"]))
+            if geolocation is not None
+            else None,
+            source_longitude=Decimal(str(geolocation["longitude"]))
+            if geolocation is not None
+            else None,
         )
 
         self.session.add(transaction)
@@ -150,6 +155,7 @@ class PixTransactionRepository:
         source_account = payload["source_account"]
         destination_account = payload["destination_account"]
         source = payload["source"]
+        geolocation = source.get("geolocation")
         return TransactionData(
             id=payload["id"],
             amount=payload["amount"],
@@ -164,8 +170,12 @@ class PixTransactionRepository:
             ),
             destination_account_opening_date=destination_account_opening_date,
             source_device_id=source["device_id"],
-            source_latitude=float(source["geolocation"]["latitude"]),
-            source_longitude=float(source["geolocation"]["longitude"]),
+            source_latitude=float(geolocation["latitude"])
+            if geolocation is not None
+            else None,
+            source_longitude=float(geolocation["longitude"])
+            if geolocation is not None
+            else None,
         )
 
     @staticmethod

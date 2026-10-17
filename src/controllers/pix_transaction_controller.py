@@ -1,10 +1,10 @@
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 
 from controllers.antifraud import POLICY, analyze
 from controllers.base_controller import BaseController
-from errors import InvalidPixTransactionTimestamp, PixTransactionTimestampOutsideAllowedWindow
+from errors import InvalidPixTransactionTimestamp
 from repositories import PixTransactionAnalysisRepository, PixTransactionRepository
 
 
@@ -42,7 +42,6 @@ class PixTransactionController(BaseController):
         existing_transaction = self.pix_transaction_repository.get_by_id(transaction_id)
         if existing_transaction is None:
             received_at = self.pix_transaction_repository.get_database_timestamp()
-            self._validate_timestamp_skew(transaction_date, received_at)
             transaction_data = self.pix_transaction_repository.from_payload(
                 payload,
                 transaction_date,
@@ -102,12 +101,3 @@ class PixTransactionController(BaseController):
             raise InvalidPixTransactionTimestamp(field_name, value)
 
         return parsed
-
-    @staticmethod
-    def _validate_timestamp_skew(transaction_date: datetime, received_at: datetime) -> None:
-        max_difference = timedelta(minutes=POLICY.max_timestamp_difference_minutes)
-        if abs(transaction_date - received_at) >= max_difference:
-            raise PixTransactionTimestampOutsideAllowedWindow(
-                transaction_date.isoformat(),
-                POLICY.max_timestamp_difference_minutes,
-            )

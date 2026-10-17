@@ -12,20 +12,6 @@ class InvalidPixTransactionTimestamp(QIException):
         super().__init__(title, self.code, http_status, description, translation)
 
 
-class PixTransactionTimestampOutsideAllowedWindow(QIException):
-    code = "QIT001010"
-
-    def __init__(self, value, max_difference_minutes) -> None:
-        title = "PIX transaction timestamp outside allowed window"
-        http_status = 422
-        description = (
-            f"The transaction timestamp '{value}' differs from server receipt time "
-            f"by at least {max_difference_minutes} minutes."
-        )
-        translation = "O horário da transação PIX difere em pelo menos 5 minutos do recebimento."
-        super().__init__(title, self.code, http_status, description, translation)
-
-
 class NotFoundPixTransactionAnalysis(QIException):
     code = "QIT001008"
 

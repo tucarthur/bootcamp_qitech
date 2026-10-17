@@ -1,11 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 from controllers.antifraud import POLICY, TransactionData, analyze
-from controllers.pix_transaction_controller import PixTransactionController
-from errors import PixTransactionTimestampOutsideAllowedWindow
 
 
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=timezone(timedelta(hours=-3)))
@@ -46,24 +42,62 @@ def triggered(result: dict) -> dict[str, dict]:
     }
 
 
-def test_hard_ceiling_is_strict_and_blocks():
-    assert "hard_ceiling" not in triggered(analyze(transaction(amount=5_000_000), [], POLICY))
-    result = analyze(transaction(amount=5_000_001), [], POLICY)
-    assert triggered(result)["hard_ceiling"]["block"] is True
-    assert result["status"] == "rejected"
+def test_high_value_requires_human_confirmation_without_automatic_rejection():
+    result = analyze(
+        transaction(amount=POLICY.high_value_review_amount_cents),
+        [],
+        POLICY,
+    )
 
-    multiple_rules = analyze(
+    assert result["status"] == "two_factor_required"
+    assert triggered(result)["high_value_review"]["points"] == 0
+    assert triggered(result)["high_value_review"]["block"] is False
+    assert result["metadata"]["authentication"] == {
+        "type": "human_in_the_loop",
+        "reason": "high_value_transaction",
+        "required": True,
+    }
+    assert (
+        result["metadata"]["thresholds"]["high_value_review_amount"]
+        == POLICY.high_value_review_amount_cents
+    )
+
+    larger_amount = analyze(
+        transaction(amount=POLICY.high_value_review_amount_cents + 1),
+        [],
+        POLICY,
+    )
+    assert larger_amount["status"] == "two_factor_required"
+    assert "hard_ceiling" not in triggered(larger_amount)
+
+
+def test_destination_amount_threshold_depends_on_document_type():
+    cpf = analyze(
+        transaction(amount=POLICY.destination_cpf_amount_cents),
+        [],
+        POLICY,
+    )
+    assert triggered(cpf)["destination_type_amount"]["points"] == 3
+
+    cnpj = analyze(
         transaction(
-            amount=5_000_001,
-            transaction_date=NOW.replace(hour=22),
-            destination_account_opening_date=NOW - timedelta(days=1),
+            amount=POLICY.destination_cnpj_amount_cents,
+            destination_document_number="12345678000195",
         ),
         [],
         POLICY,
     )
-    assert {"hard_ceiling", "night_over_limit", "young_destination", "new_payee"}.issubset(
-        triggered(multiple_rules)
+    assert triggered(cnpj)["destination_type_amount"]["points"] == 2
+
+    below_cnpj_limit = analyze(
+        transaction(
+            amount=POLICY.destination_cnpj_amount_cents - 1,
+            destination_document_number="12345678000195",
+        ),
+        [],
+        POLICY,
     )
+    assert "destination_type_amount" not in triggered(below_cnpj_limit)
 
 
 def test_night_rule_uses_sao_paulo_time_and_cpf_only():
@@ -114,12 +148,16 @@ def test_score_thresholds_select_two_factor_and_rejection():
 
 
 def test_burst_has_exclusive_step_and_rejection_tiers():
-    result = analyze(transaction(), [previous(minutes=9 - index) for index in range(4)], POLICY)
+    result = analyze(transaction(), [previous(minutes=9 - index) for index in range(
+        POLICY.burst_cpf_two_factor_count - 1
+    )], POLICY)
     assert triggered(result)["burst"]["points"] == POLICY.burst_points
 
     blocked = analyze(
         transaction(),
-        [previous(minutes=9 - index) for index in range(9)],
+        [previous(minutes=9 - index) for index in range(
+            POLICY.burst_cpf_reject_count - 1
+        )],
         POLICY,
     )
     assert triggered(blocked)["burst"]["block"] is True
@@ -129,7 +167,7 @@ def test_burst_has_exclusive_step_and_rejection_tiers():
     assert "burst" not in triggered(cutoff_only)
 
 
-def test_velocity_windows_use_receipt_time_not_caller_event_time():
+def test_velocity_windows_use_caller_event_time_not_receipt_time():
     current = transaction(
         transaction_date=NOW - timedelta(days=365),
         received_at=NOW,
@@ -145,25 +183,7 @@ def test_velocity_windows_use_receipt_time_not_caller_event_time():
 
     result = analyze(current, history, POLICY)
 
-    assert triggered(result)["burst"]["points"] == POLICY.burst_points
-
-
-def test_timestamp_skew_rejects_at_five_minutes_and_accepts_below():
-    received_at = NOW
-
-    PixTransactionController._validate_timestamp_skew(
-        received_at + timedelta(minutes=5) - timedelta(microseconds=1),
-        received_at,
-    )
-    PixTransactionController._validate_timestamp_skew(
-        received_at - timedelta(minutes=5) + timedelta(microseconds=1),
-        received_at,
-    )
-
-    for event_time in (received_at + timedelta(minutes=5), received_at - timedelta(minutes=5)):
-        with pytest.raises(PixTransactionTimestampOutsideAllowedWindow) as error:
-            PixTransactionController._validate_timestamp_skew(event_time, received_at)
-        assert error.value.code == "QIT001010"
+    assert "burst" not in triggered(result)
 
 
 def test_rolling_total_excludes_rejected_and_uses_strict_thresholds():
@@ -176,13 +196,13 @@ def test_rolling_total_excludes_rejected_and_uses_strict_thresholds():
 
     blocked = analyze(
         transaction(amount=1),
-        [previous(amount=3_000_000)],
+        [previous(amount=POLICY.rolling_24h_cpf_reject_cents)],
         POLICY,
     )
     assert triggered(blocked)["rolling_24h_total"]["block"] is True
     at_boundary = analyze(
         transaction(amount=1),
-        [previous(amount=999_999)],
+        [previous(amount=POLICY.rolling_24h_cpf_two_factor_cents - 1)],
         POLICY,
     )
     assert "rolling_24h_total" not in triggered(at_boundary)
@@ -213,6 +233,18 @@ def test_amount_median_uses_latest_fifty_not_largest_fifty():
     ]
     result = analyze(transaction(amount=60_000), [old_large, *recent], POLICY)
     assert "amount_vs_median" in triggered(result)
+
+
+def test_amount_median_uses_robust_z_score_and_mad_floor():
+    stable_history = [
+        previous(minutes=index + 1, amount=100_000)
+        for index in range(POLICY.amount_median_min_samples)
+    ]
+    high_deviation = analyze(transaction(amount=105_000), stable_history, POLICY)
+    assert "amount_vs_median" in triggered(high_deviation)
+
+    below_threshold = analyze(transaction(amount=102_999), stable_history, POLICY)
+    assert "amount_vs_median" not in triggered(below_threshold)
 
 
 def test_successful_rules_are_omitted_and_skipped_rules_only_appear_when_needed():
@@ -276,6 +308,17 @@ def test_impossible_travel_requires_recent_prior_geo_and_exceeds_both_cutoffs():
 
     no_geo = analyze(transaction(), [], POLICY)
     assert any(item["rule"] == "impossible_travel" for item in no_geo["metadata"]["rules_skipped"])
+
+    current_without_geo = analyze(
+        transaction(source_latitude=None, source_longitude=None),
+        [previous(minutes=5, source_latitude=0.0, source_longitude=0.0)],
+        POLICY,
+    )
+    skipped_travel = {
+        item["rule"]: item["reason"]
+        for item in current_without_geo["metadata"]["rules_skipped"]
+    }
+    assert skipped_travel["impossible_travel"] == "Geolocalizacao ausente no Pix atual."
 
 
 def test_young_destination_has_one_tier_and_future_dates_clamp_to_zero():
@@ -376,7 +419,12 @@ def test_obvious_low_risk_transaction_is_approved():
 
 
 def test_rejected_history_does_not_inflate_effective_total():
-    history = [previous(amount=POLICY.rolling_24h_reject_cents, status="rejected")]
+    history = [
+        previous(
+            amount=POLICY.rolling_24h_cpf_reject_cents,
+            status="rejected",
+        )
+    ]
 
     result = analyze(transaction(amount=1_000), history, POLICY)
 
@@ -386,7 +434,7 @@ def test_rejected_history_does_not_inflate_effective_total():
 
 def test_out_of_window_history_does_not_trigger_burst_or_rolling_total():
     old = previous(
-        amount=POLICY.rolling_24h_reject_cents,
+        amount=POLICY.rolling_24h_cpf_reject_cents,
         received_at=NOW - timedelta(hours=POLICY.rolling_24h_window_hours, seconds=1),
         transaction_date=NOW - timedelta(hours=POLICY.rolling_24h_window_hours, seconds=1),
     )
@@ -397,19 +445,11 @@ def test_out_of_window_history_does_not_trigger_burst_or_rolling_total():
     assert not {"burst", "rolling_24h_total"}.intersection(triggered(result))
 
 
-def test_amount_above_hard_ceiling_is_rejected():
-    result = analyze(
-        transaction(amount=POLICY.hard_ceiling_cents + 1),
-        [],
-        POLICY,
-    )
-
-    assert result["status"] == "rejected"
-    assert triggered(result)["hard_ceiling"]["block"] is True
-
-
 def test_tenth_recent_payer_attempt_is_rejected():
-    history = [previous(minutes=index + 1) for index in range(POLICY.burst_reject_count - 1)]
+    history = [
+        previous(minutes=index + 1)
+        for index in range(POLICY.burst_cpf_reject_count - 1)
+    ]
 
     result = analyze(transaction(), history, POLICY)
 
@@ -418,7 +458,7 @@ def test_tenth_recent_payer_attempt_is_rejected():
 
 
 def test_effective_rolling_total_above_reject_limit_is_rejected():
-    history = [previous(amount=POLICY.rolling_24h_reject_cents)]
+    history = [previous(amount=POLICY.rolling_24h_cpf_reject_cents)]
 
     result = analyze(transaction(), history, POLICY)
 
@@ -427,7 +467,10 @@ def test_effective_rolling_total_above_reject_limit_is_rejected():
 
 
 def test_fifth_recent_payer_attempt_requires_two_factor():
-    history = [previous(minutes=index + 1) for index in range(POLICY.burst_two_factor_count - 1)]
+    history = [
+        previous(minutes=index + 1)
+        for index in range(POLICY.burst_cpf_two_factor_count - 1)
+    ]
 
     result = analyze(transaction(), history, POLICY)
 
@@ -437,13 +480,79 @@ def test_fifth_recent_payer_attempt_requires_two_factor():
 
 def test_rolling_total_above_two_factor_limit_requires_two_factor():
     result = analyze(
-        transaction(amount=POLICY.rolling_24h_two_factor_cents + 1),
+        transaction(amount=POLICY.rolling_24h_cpf_two_factor_cents + 1),
         [],
         POLICY,
     )
 
     assert result["status"] == "two_factor_required"
     assert triggered(result)["rolling_24h_total"]["points"] == POLICY.rolling_24h_points
+
+
+def test_burst_and_rolling_thresholds_are_higher_for_cnpj_payers():
+    cnpj = "12345678000195"
+    burst_history = [
+        previous(
+            minutes=index + 1,
+            source_document_number=cnpj,
+        )
+        for index in range(POLICY.burst_cpf_two_factor_count - 1)
+    ]
+    assert "burst" not in triggered(
+        analyze(transaction(source_document_number=cnpj), burst_history, POLICY)
+    )
+    cnpj_burst = analyze(
+        transaction(source_document_number=cnpj),
+        [
+            previous(
+                minutes=1 + index % 9,
+                source_document_number=cnpj,
+                id=f"cnpj-attempt-{index}",
+            )
+            for index in range(POLICY.burst_cnpj_two_factor_count - 1)
+        ],
+        POLICY,
+    )
+    assert triggered(cnpj_burst)["burst"]["points"] == POLICY.burst_points
+
+    high_value = analyze(
+        transaction(amount=6_000_000),
+        [],
+        POLICY,
+    )
+    assert high_value["status"] == "two_factor_required"
+    assert triggered(high_value)["rolling_24h_total"]["block"] is False
+    assert high_value["metadata"]["authentication"]["type"] == "human_in_the_loop"
+
+    prior_over_daily_limit = analyze(
+        transaction(amount=6_000_000),
+        [previous(amount=POLICY.rolling_24h_cpf_reject_cents + 1)],
+        POLICY,
+    )
+    assert prior_over_daily_limit["status"] == "rejected"
+    assert triggered(prior_over_daily_limit)["rolling_24h_total"]["block"] is True
+
+    daily_two_factor = analyze(
+        transaction(
+            amount=POLICY.rolling_24h_cnpj_two_factor_cents + 1,
+            source_document_number=cnpj,
+        ),
+        [],
+        POLICY,
+    )
+    assert triggered(daily_two_factor)["rolling_24h_total"]["points"] == (
+        POLICY.rolling_24h_points
+    )
+
+    below_daily_two_factor = analyze(
+        transaction(
+            amount=POLICY.rolling_24h_cnpj_two_factor_cents,
+            source_document_number=cnpj,
+        ),
+        [],
+        POLICY,
+    )
+    assert "rolling_24h_total" not in triggered(below_daily_two_factor)
 
 
 def test_new_device_and_first_payee_require_two_factor():

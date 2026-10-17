@@ -291,9 +291,9 @@ curl -X POST http://localhost:3000/pix/transaction \
   "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "3",
+    "engine_version": "4",
     "score": 5,
-    "thresholds": {"two_factor": 3, "reject": 8},
+    "thresholds": {"two_factor": 3, "reject": 8, "high_value_review_amount": 5000000},
     "rules_triggered": [
       {
         "rule": "night_over_limit",
@@ -325,11 +325,11 @@ curl -X POST http://localhost:3000/pix/transaction \
 
 A API responde **201** com a análise e grava, na mesma transação de banco,
 a transação em `pix_transaction` e a decisão em `pix_analysis`. O `amount`
-é recebido em centavos, sem conversão. `transaction_date` é preservado como
-o horário de evento informado pelo chamador; ele deve diferir em menos de
-5 minutos do horário `received_at`, obtido do relógio do PostgreSQL. Diferenças
-de 5 minutos ou mais são recusadas com **422**. `received_at` serve como
-referência para idades de conta e janelas antifraude.
+é recebido em centavos, sem conversão. `transaction_date` é a referência temporal da análise: janelas de histórico,
+idades de conta, deslocamento e horário local usam essa data, não o relógio do
+servidor. `received_at` continua registrado para auditoria, mas não muda a
+decisão antifraude. Assim, um evento pode ser analisado mesmo quando chega
+com atraso ou quando o relógio de quem envia difere do servidor.
 O motor coordena análises concorrentes por pagador, dispositivo e destinatário
 com locks transacionais do PostgreSQL. Reenviar um `id` já analisado
 responde **200** com a análise original: a requisição não atualiza nem
@@ -349,9 +349,9 @@ O resultado da transação acima pode ser consultado com **200**:
   "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "3",
+    "engine_version": "4",
     "score": 5,
-    "thresholds": {"two_factor": 3, "reject": 8},
+    "thresholds": {"two_factor": 3, "reject": 8, "high_value_review_amount": 5000000},
     "rules_triggered": [
       {"rule": "night_over_limit", "points": 2, "block": false, "reason": "CPF realizou 150000 centavos no horario noturno (hora local 22; limite 100000)."},
       {"rule": "young_destination", "points": 2, "block": false, "reason": "Conta de destino tem 7.55 dias (faixa abaixo de 30)."},
@@ -371,34 +371,37 @@ a chave UUID da análise. Uma transação inexistente responde **404**.
 
 #### Como a decisão antifraude é calculada
 
-O motor executa as 12 regras abaixo em ordem fixa. `received_at`, gerado pelo
-PostgreSQL depois da aquisição dos locks, é a referência das janelas de
-histórico, idades de conta e deslocamento; o horário local da regra noturna
-vem de `transaction_date`. Horários de evento a 5 minutos ou mais do recebimento
-são recusados. O histórico só considera recebimentos anteriores
-com `received_at` estritamente menor e exclui o próprio `id`. Tentativas
-incluem decisões rejeitadas; movimentações efetivas não. Valores são
-centavos, documentos são armazenados somente com dígitos (11 para CPF e
-14 para CNPJ), e a hora noturna usa `America/Sao_Paulo`.
+O motor executa as 13 regras abaixo sem interromper após um alerta.
+`transaction_date` é a referência de todas as janelas e idades; o histórico
+considera transações com `transaction_date` estritamente anterior e exclui o
+próprio `id`. Tentativas incluem decisões rejeitadas; movimentações efetivas
+não. Valores são centavos, documentos são armazenados somente com dígitos
+(11 para CPF e 14 para CNPJ), e a hora noturna usa `America/Sao_Paulo`.
 
 | Regra | Condição e efeito |
 |---|---|
-| `hard_ceiling` | Valor acima de 5.000.000 centavos bloqueia a transação. |
+| `high_value_review` | Valor de pelo menos 5.000.000 centavos exige 2FA reforçado com confirmação humana independente; não soma pontos nem bloqueia sozinho. |
+| `destination_type_amount` | Destinatário CPF e valor de pelo menos 1.000.000 centavos: +3; destinatário CNPJ e valor de pelo menos 5.000.000: +2. |
 | `night_over_limit` | Pagador CPF, hora local a partir das 20h ou antes das 6h e valor acima de 100.000: +2. |
-| `burst` | Pelo menos 5 tentativas do pagador nos 10 minutos anteriores, contando a atual: +3. A partir de 10, bloqueia em vez de pontuar. |
-| `rolling_24h_total` | Soma efetiva do pagador nas últimas 24 horas, incluindo a atual: acima de 1.000.000, +2; acima de 3.000.000, bloqueia. |
-| `amount_vs_median` | Com pelo menos 5 movimentações efetivas do pagador nos últimos 90 dias, compara com a mediana das até 50 mais recentes. Valor acima de 5 vezes a mediana e acima de 50.000: +2. |
+| `burst` | Janela de 10 minutos contando a atual: CPF a partir de 5 tentativas +3 e a partir de 10 bloqueia; CNPJ a partir de 20 +3 e a partir de 40 bloqueia. |
+| `rolling_24h_total` | Soma efetiva nas últimas 24 horas, incluindo a atual: CPF acima de 1.000.000 +2 / acima de 3.000.000 bloqueia; CNPJ acima de 5.000.000 +2 / acima de 15.000.000 bloqueia. |
+| `amount_vs_median` | Com pelo menos 5 movimentações efetivas nos últimos 90 dias (até as 50 mais recentes), usa `MAD = median(|x - median|)` e desvio robusto `(valor - mediana) / max(1.4826 × MAD, piso)`. Desvio ≥ 3 e valor ≥ 50.000: +2. |
 | `new_device` | Com pelo menos 3 tentativas anteriores do pagador nos últimos 90 dias, dispositivo ainda não visto e valor de pelo menos 20.000: +2. |
 | `young_payer_account` | Conta de origem com menos de 30 dias e valor acima de 100.000: +1. |
 | `impossible_travel` | Comparando com a transação anterior geolocalizada do pagador nas últimas 24 horas, distância de pelo menos 100 km e velocidade acima de 900 km/h: +3. O tempo mínimo usado no cálculo é um minuto. |
 | `young_destination` | Destino com menos de 7 dias e valor de pelo menos 50.000: +3; se tiver menos de 30 dias, +2. Apenas uma faixa pontua; abertura futura equivale a idade zero. |
 | `new_payee` | Sem movimentação efetiva anterior do pagador para o destino e valor de pelo menos 100.000: +1. |
 | `mule_fan_in` | Destino CPF que recebeu de pelo menos 5 CPFs distintos nas últimas 24 horas, contando a atual: +3. A partir de 10 pagadores, bloqueia. |
-| `shared_device` | Dispositivo usado por pelo menos 3 CPFs distintos nas últimas 24 horas, contando o atual: +3. |
+| `shared_device` | Dispositivo usado por pelo menos 3 documentos de pagadores distintos nas últimas 24 horas, contando o atual: +3. |
+
+Uma transação de alto valor que, sozinha, ultrapasse o teto diário exige
+confirmação humana em vez de bloqueio automático. O bloqueio diário continua
+valendo quando o histórico efetivo anterior já ultrapassa esse teto.
 
 Pagamento para si mesmo (CPF/CNPJ de origem igual ao destino) não executa
 `young_destination`, `new_payee` nem `mule_fan_in`. O `metadata` contém
-`engine_version`, `score`, `thresholds` e `rules_triggered`; quando faltar
+`engine_version`, `score`, `thresholds` e `rules_triggered`; em alto valor,
+também registra `authentication` com tipo `human_in_the_loop`; quando faltar
 histórico necessário, também contém `rules_skipped`. Uma regra que executou
 e não disparou não aparece nos metadados. Cada regra disparada inclui
 identificador, pontos, indicação de bloqueio e motivo observado. Qualquer
@@ -412,14 +415,26 @@ adicione o horário de recebimento. Para registros antigos, `created_at` é a
 melhor aproximação disponível:
 
 ```sql
-ALTER TABLE pix_transaction ADD COLUMN received_at TIMESTAMPTZ;
+ALTER TABLE pix_transaction ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ;
 UPDATE pix_transaction SET received_at = created_at WHERE received_at IS NULL;
 ALTER TABLE pix_transaction
     ALTER COLUMN received_at SET DEFAULT CLOCK_TIMESTAMP(),
     ALTER COLUMN received_at SET NOT NULL;
+ALTER TABLE pix_transaction
+    ALTER COLUMN source_latitude DROP NOT NULL,
+    ALTER COLUMN source_longitude DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_pix_transaction_source_document_date
+    ON pix_transaction (source_document_number, transaction_date);
+CREATE INDEX IF NOT EXISTS idx_pix_transaction_destination_document_date
+    ON pix_transaction (destination_document_number, transaction_date);
+CREATE INDEX IF NOT EXISTS idx_pix_transaction_payer_payee
+    ON pix_transaction (source_document_number, destination_document_number);
+CREATE INDEX IF NOT EXISTS idx_pix_transaction_device_date
+    ON pix_transaction (source_device_id, transaction_date);
 ```
 
-O `database/database.sql` já cria a coluna para bancos novos.
+O `database/database.sql` já cria as colunas para bancos novos. A geolocalização
+é opcional; sem ela, `impossible_travel` é registrada em `rules_skipped`.
 
 E existe uma fronteira aqui que vale a pena enxergar cedo. Mande um CPF
 com o formato certo e os dígitos errados:

@@ -28,15 +28,15 @@ def analyze(
     history: list[TransactionData],
     policy: AntifraudPolicy,
 ) -> dict:
-    now = transaction.received_at
+    now = transaction.transaction_date
     if now.utcoffset() is None:
-        raise ValueError("received_at must be timezone-aware")
-    if any(item.received_at.utcoffset() is None for item in history):
-        raise ValueError("history received_at values must be timezone-aware")
+        raise ValueError("transaction_date must be timezone-aware")
+    if any(item.transaction_date.utcoffset() is None for item in history):
+        raise ValueError("history transaction_date values must be timezone-aware")
     prior = [
         item
         for item in history
-        if item.id != transaction.id and item.received_at < now
+        if item.id != transaction.id and item.transaction_date < now
     ]
     score = 0
     blocked = False
@@ -56,7 +56,7 @@ def analyze(
         skipped.append({"rule": rule, "reason": reason})
 
     def in_window(item: TransactionData, window: timedelta) -> bool:
-        return now - window <= item.received_at < now
+        return now - window <= item.transaction_date < now
 
     def effective(item: TransactionData) -> bool:
         return item.status != "rejected"
@@ -65,18 +65,44 @@ def analyze(
         item for item in prior
         if item.source_document_number == transaction.source_document_number
     ]
-    recent_attempts_10m = [
-        item for item in payer_attempts
-        if now - timedelta(minutes=policy.burst_window_minutes) < item.received_at
-    ]
-
-    if transaction.amount > policy.hard_ceiling_cents:
+    if transaction.amount >= policy.high_value_review_amount_cents:
         trigger(
-            "hard_ceiling",
+            "high_value_review",
             0,
-            True,
-            f"Valor observado de {transaction.amount} centavos acima do limite de {policy.hard_ceiling_cents}.",
+            False,
+            f"Valor de {transaction.amount} centavos exige confirmação humana independente.",
         )
+
+    destination_type_rules = {
+        policy.cpf_digits: (
+            policy.destination_cpf_amount_cents,
+            policy.destination_cpf_points,
+            "CPF",
+        ),
+        policy.cnpj_digits: (
+            policy.destination_cnpj_amount_cents,
+            policy.destination_cnpj_points,
+            "CNPJ",
+        ),
+    }
+    destination_type_rule = destination_type_rules.get(
+        len(transaction.destination_document_number)
+    )
+    if destination_type_rule is None:
+        skip(
+            "destination_type_amount",
+            "Tipo de documento do destinatario desconhecido; esperado CPF (11 digitos) ou CNPJ (14 digitos).",
+        )
+    else:
+        destination_threshold, destination_points, destination_type = destination_type_rule
+        if transaction.amount >= destination_threshold:
+            trigger(
+                "destination_type_amount",
+                destination_points,
+                False,
+                f"Valor de {transaction.amount} centavos para destinatario {destination_type} "
+                f"atinge o limite de {destination_threshold} centavos.",
+            )
 
     local_hour = transaction.transaction_date.astimezone(ZoneInfo(policy.timezone)).hour
     if (
@@ -91,21 +117,53 @@ def analyze(
             f"CPF realizou {transaction.amount} centavos no horario noturno (hora local {local_hour}; limite {policy.night_amount_cents}).",
         )
 
-    burst_count = len(recent_attempts_10m) + 1
-    if burst_count >= policy.burst_reject_count:
-        trigger(
+    payer_type_rules = {
+        policy.cpf_digits: (
+            "CPF",
+            policy.burst_cpf_two_factor_count,
+            policy.burst_cpf_reject_count,
+            policy.rolling_24h_cpf_two_factor_cents,
+            policy.rolling_24h_cpf_reject_cents,
+        ),
+        policy.cnpj_digits: (
+            "CNPJ",
+            policy.burst_cnpj_two_factor_count,
+            policy.burst_cnpj_reject_count,
+            policy.rolling_24h_cnpj_two_factor_cents,
+            policy.rolling_24h_cnpj_reject_cents,
+        ),
+    }
+    payer_type_rule = payer_type_rules.get(len(transaction.source_document_number))
+    if payer_type_rule is None:
+        skip(
             "burst",
-            0,
-            True,
-            f"{burst_count} tentativas do pagador em {policy.burst_window_minutes} minutos (bloqueio a partir de {policy.burst_reject_count}).",
+            "Tipo de documento do pagador desconhecido; esperado CPF (11 digitos) ou CNPJ (14 digitos).",
         )
-    elif burst_count >= policy.burst_two_factor_count:
-        trigger(
-            "burst",
-            policy.burst_points,
-            False,
-            f"{burst_count} tentativas do pagador em {policy.burst_window_minutes} minutos (2FA a partir de {policy.burst_two_factor_count}).",
-        )
+    else:
+        payer_type, burst_two_factor_count, burst_reject_count, _, _ = payer_type_rule
+        recent_attempts_10m = [
+            item
+            for item in payer_attempts
+            if now - timedelta(minutes=policy.burst_window_minutes)
+            < item.transaction_date
+        ]
+        burst_count = len(recent_attempts_10m) + 1
+        if burst_count >= burst_reject_count:
+            trigger(
+                "burst",
+                0,
+                True,
+                f"{burst_count} tentativas do pagador {payer_type} em "
+                f"{policy.burst_window_minutes} minutos (bloqueio a partir de {burst_reject_count}).",
+            )
+        elif burst_count >= burst_two_factor_count:
+            trigger(
+                "burst",
+                policy.burst_points,
+                False,
+                f"{burst_count} tentativas do pagador {payer_type} em "
+                f"{policy.burst_window_minutes} minutos (2FA a partir de {burst_two_factor_count}).",
+            )
 
     rolling_window = timedelta(hours=policy.rolling_24h_window_hours)
     rolling_movements = [
@@ -113,20 +171,43 @@ def analyze(
         for item in payer_attempts
         if effective(item) and in_window(item, rolling_window)
     ]
-    rolling_total = sum(item.amount for item in rolling_movements) + transaction.amount
-    if rolling_total > policy.rolling_24h_reject_cents:
-        trigger(
+    prior_rolling_total = sum(item.amount for item in rolling_movements)
+    rolling_total = prior_rolling_total + transaction.amount
+    if payer_type_rule is None:
+        skip(
             "rolling_24h_total",
-            0,
-            True,
-            f"Movimentacao efetiva observada de {rolling_total} centavos em 24 horas (bloqueio acima de {policy.rolling_24h_reject_cents}).",
+            "Tipo de documento do pagador desconhecido; esperado CPF (11 digitos) ou CNPJ (14 digitos).",
         )
-    elif rolling_total > policy.rolling_24h_two_factor_cents:
+    else:
+        _, _, _, rolling_two_factor_cents, rolling_reject_cents = payer_type_rule
+    if payer_type_rule is not None and rolling_total > rolling_reject_cents:
+        if (
+            transaction.amount >= policy.high_value_review_amount_cents
+            and prior_rolling_total <= rolling_reject_cents
+        ):
+            trigger(
+                "rolling_24h_total",
+                policy.rolling_24h_points,
+                False,
+                f"Movimentacao efetiva observada de {rolling_total} centavos em 24 horas "
+                f"para pagador {payer_type}; o Pix de alto valor exige confirmacao humana "
+                "e nao bloqueia automaticamente.",
+            )
+        else:
+            trigger(
+                "rolling_24h_total",
+                0,
+                True,
+                f"Movimentacao efetiva observada de {rolling_total} centavos em 24 horas "
+                f"para pagador {payer_type} (bloqueio acima de {rolling_reject_cents}).",
+            )
+    elif payer_type_rule is not None and rolling_total > rolling_two_factor_cents:
         trigger(
             "rolling_24h_total",
             policy.rolling_24h_points,
             False,
-            f"Movimentacao efetiva observada de {rolling_total} centavos em 24 horas (2FA acima de {policy.rolling_24h_two_factor_cents}).",
+            f"Movimentacao efetiva observada de {rolling_total} centavos em 24 horas "
+            f"para pagador {payer_type} (2FA acima de {rolling_two_factor_cents}).",
         )
 
     median_window = timedelta(days=policy.amount_median_window_days)
@@ -136,7 +217,7 @@ def analyze(
             for item in payer_attempts
             if effective(item) and in_window(item, median_window)
         ),
-        key=lambda item: (item.received_at, item.id),
+        key=lambda item: (item.transaction_date, item.id),
         reverse=True,
     )[: policy.amount_median_max_samples]
     median_samples = [item.amount for item in median_history]
@@ -147,15 +228,24 @@ def analyze(
         )
     else:
         reference_median = median(median_samples)
+        median_absolute_deviation = median(
+            abs(amount - reference_median) for amount in median_samples
+        )
+        scale = max(
+            policy.amount_median_mad_scale * median_absolute_deviation,
+            policy.amount_median_scale_floor_cents,
+        )
+        robust_z_score = (transaction.amount - reference_median) / scale
         if (
-            transaction.amount > policy.amount_median_multiplier * reference_median
-            and transaction.amount > policy.amount_median_min_cents
+            robust_z_score >= policy.amount_median_robust_z_threshold
+            and transaction.amount >= policy.amount_median_min_cents
         ):
             trigger(
                 "amount_vs_median",
                 policy.amount_median_points,
                 False,
-                f"Valor de {transaction.amount} centavos supera {policy.amount_median_multiplier} vezes a mediana de {reference_median:g}.",
+                f"Valor de {transaction.amount} centavos tem desvio robusto "
+                f"{robust_z_score:.2f} (mediana {reference_median:g}, MAD {median_absolute_deviation:g}).",
             )
 
     device_window = timedelta(days=policy.new_device_window_days)
@@ -209,7 +299,7 @@ def analyze(
     elif transaction.source_latitude is not None and transaction.source_longitude is not None:
         latest_geo = max(
             geo_history,
-            key=lambda item: (item.received_at, item.id),
+            key=lambda item: (item.transaction_date, item.id),
         )
         distance = _distance_km(
             float(latest_geo.source_latitude),
@@ -219,7 +309,7 @@ def analyze(
             policy.earth_radius_km,
         )
         elapsed_seconds = max(
-            (now - latest_geo.received_at).total_seconds(),
+            (now - latest_geo.transaction_date).total_seconds(),
             policy.impossible_travel_min_elapsed_seconds,
         )
         speed = distance / (elapsed_seconds / 3600)
@@ -233,8 +323,15 @@ def analyze(
                 False,
                 f"Deslocamento de {distance:.1f} km a {speed:.1f} km/h em menos de 24 horas.",
             )
+    else:
+        skip(
+            "impossible_travel",
+            "Geolocalizacao ausente no Pix atual.",
+        )
 
-    if not self_payment and transaction.amount >= policy.young_destination_min_cents:
+    if self_payment:
+        skip("young_destination", "Pagador e destinatario sao o mesmo documento.")
+    elif transaction.amount >= policy.young_destination_min_cents:
         destination_age = max(
             now - transaction.destination_account_opening_date,
             timedelta(0),
@@ -254,28 +351,30 @@ def analyze(
                 f"Conta de destino tem {destination_age.total_seconds() / 86400:.2f} dias (faixa abaixo de {policy.young_destination_second_age_days}).",
             )
 
-    prior_effective_payee = any(
-        effective(item)
-        and item.source_document_number == transaction.source_document_number
-        and item.destination_document_number == transaction.destination_document_number
-        for item in prior
-    )
-    if (
-        not self_payment
-        and transaction.amount >= policy.new_payee_min_cents
-        and not prior_effective_payee
-    ):
-        trigger(
-            "new_payee",
-            policy.new_payee_points,
-            False,
-            f"Nao ha movimentacao efetiva anterior para o favorecido {transaction.destination_document_number}; valor de {transaction.amount} centavos.",
+    if self_payment:
+        skip("new_payee", "Pagador e destinatario sao o mesmo documento.")
+    else:
+        prior_effective_payee = any(
+            effective(item)
+            and item.source_document_number == transaction.source_document_number
+            and item.destination_document_number == transaction.destination_document_number
+            for item in prior
         )
+        if (
+            transaction.amount >= policy.new_payee_min_cents
+            and not prior_effective_payee
+        ):
+            trigger(
+                "new_payee",
+                policy.new_payee_points,
+                False,
+                f"Nao ha movimentacao efetiva anterior para o favorecido "
+                f"{transaction.destination_document_number}; valor de {transaction.amount} centavos.",
+            )
 
-    if (
-        not self_payment
-        and len(transaction.destination_document_number) == policy.cpf_digits
-    ):
+    if self_payment:
+        skip("mule_fan_in", "Pagador e destinatario sao o mesmo documento.")
+    elif len(transaction.destination_document_number) == policy.cpf_digits:
         fan_in_window = timedelta(hours=policy.mule_fan_in_window_hours)
         payer_documents = {
             item.source_document_number
@@ -299,6 +398,12 @@ def analyze(
                 False,
                 f"{fan_in_count} pagadores distintos enviaram para o CPF {transaction.destination_document_number} em 24 horas (2FA a partir de {policy.mule_fan_in_two_factor_count}).",
             )
+
+    elif len(transaction.destination_document_number) != policy.cpf_digits:
+        skip(
+            "mule_fan_in",
+            "Regra aplicavel somente a destinatarios CPF.",
+        )
 
     shared_window = timedelta(hours=policy.shared_device_window_hours)
     device_documents = {
@@ -330,9 +435,19 @@ def analyze(
         "thresholds": {
             "two_factor": policy.two_factor_score,
             "reject": policy.reject_score,
+            "high_value_review_amount": policy.high_value_review_amount_cents,
         },
         "rules_triggered": triggered,
     }
+    if (
+        transaction.amount >= policy.high_value_review_amount_cents
+        and status == "two_factor_required"
+    ):
+        metadata["authentication"] = {
+            "type": "human_in_the_loop",
+            "reason": "high_value_transaction",
+            "required": True,
+        }
     if skipped:
         metadata["rules_skipped"] = skipped
 
