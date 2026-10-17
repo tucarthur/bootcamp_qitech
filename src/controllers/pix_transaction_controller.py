@@ -1,20 +1,21 @@
 from datetime import datetime
 
+from sqlalchemy.exc import IntegrityError
+
+from controllers.antifraud import POLICY, analyze
 from controllers.base_controller import BaseController
-from errors import DuplicatePixTransaction, InvalidPixTransactionTimestamp
-from repositories import PixTransactionRepository
+from errors import InvalidPixTransactionTimestamp
+from repositories import PixTransactionAnalysisRepository, PixTransactionRepository
 
 
 class PixTransactionController(BaseController):
     def __init__(self) -> None:
         super().__init__(__name__)
         self.pix_transaction_repository = PixTransactionRepository(self.context)
+        self.pix_transaction_analysis_repository = PixTransactionAnalysisRepository(self.context)
 
-    def create(self, payload: dict) -> dict:
+    def create(self, payload: dict) -> tuple[dict, bool]:
         transaction_id = payload["id"]
-        if self.pix_transaction_repository.get_by_id(transaction_id) is not None:
-            raise DuplicatePixTransaction(transaction_id)
-
         transaction_date = self._parse_timestamp(payload["transaction_date"], "transaction_date")
         source_account_opening_date = self._parse_timestamp(
             payload["source_account"]["opening_date"],
@@ -25,15 +26,59 @@ class PixTransactionController(BaseController):
             "destination_account.opening_date",
         )
 
-        self.pix_transaction_repository.create(
-            payload,
-            transaction_date,
-            source_account_opening_date,
-            destination_account_opening_date,
+        existing_analysis = (
+            self.pix_transaction_analysis_repository.get_by_transaction_id(transaction_id)
         )
-        self.session.commit()
+        if existing_analysis is not None:
+            return self._analysis_response(existing_analysis), False
 
-        return {"id": transaction_id}
+        existing_transaction = self.pix_transaction_repository.get_by_id(transaction_id)
+        if existing_transaction is None:
+            transaction_data = self.pix_transaction_repository.from_payload(
+                payload,
+                transaction_date,
+                source_account_opening_date,
+                destination_account_opening_date,
+            )
+        else:
+            transaction_data = self.pix_transaction_repository.to_data(existing_transaction)
+
+        history = self.pix_transaction_repository.get_history_for_analysis(transaction_data)
+        decision = analyze(transaction_data, history, POLICY)
+
+        if existing_transaction is None:
+            self.pix_transaction_repository.create(
+                payload,
+                transaction_date,
+                source_account_opening_date,
+                destination_account_opening_date,
+            )
+        analysis = self.pix_transaction_analysis_repository.create(
+            transaction_id,
+            decision["status"],
+            decision["metadata"],
+        )
+
+        try:
+            self.session.commit()
+        except IntegrityError:
+            self.session.rollback()
+            existing_analysis = (
+                self.pix_transaction_analysis_repository.get_by_transaction_id(transaction_id)
+            )
+            if existing_analysis is None:
+                raise
+            return self._analysis_response(existing_analysis), False
+
+        return self._analysis_response(analysis), True
+
+    @staticmethod
+    def _analysis_response(analysis) -> dict:
+        return {
+            "key": str(analysis.key),
+            "status": analysis.status,
+            "metadata": analysis.analysis_metadata,
+        }
 
     @staticmethod
     def _parse_timestamp(value: str, field_name: str) -> datetime:

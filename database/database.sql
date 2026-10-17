@@ -172,7 +172,7 @@ ON pix_transaction (source_ip);
 CREATE INDEX idx_pix_transaction_transaction_date
 ON pix_transaction (transaction_date);
 
-CREATE TABLE pix_transaction_analysis (
+CREATE TABLE pix_analysis (
     key                             UUID PRIMARY KEY,
     transaction_id                  VARCHAR(200) NOT NULL UNIQUE
                                         REFERENCES pix_transaction(id),

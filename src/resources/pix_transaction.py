@@ -10,9 +10,9 @@ class PixTransactionResource:
     @SchemaHandler.validate("post_pix_transaction.json")
     def on_post(self, payload: dict) -> JSONResponse:
         controller = PixTransactionController()
-        transaction = controller.create(payload)
+        analysis, created = controller.create(payload)
 
         return JSONResponse(
-            content=jsonable_encoder(transaction),
-            status_code=http_status.HTTP_201_CREATED,
+            content=jsonable_encoder(analysis),
+            status_code=http_status.HTTP_201_CREATED if created else http_status.HTTP_200_OK,
         )

@@ -1,4 +1,4 @@
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from database import Context
 from models import PixTransactionAnalysis
@@ -12,6 +12,13 @@ class PixTransactionAnalysisRepository:
         return (
             self.session.query(PixTransactionAnalysis)
             .filter(PixTransactionAnalysis.transaction_id == transaction_id)
+            .first()
+        )
+
+    def get_by_key(self, key: UUID) -> PixTransactionAnalysis | None:
+        return (
+            self.session.query(PixTransactionAnalysis)
+            .filter(PixTransactionAnalysis.key == key)
             .first()
         )
 

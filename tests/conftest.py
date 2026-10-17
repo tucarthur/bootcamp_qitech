@@ -1,7 +1,11 @@
 from pathlib import Path
 from os import path, environ
+import sys
 
 root = Path(__file__).resolve().parents[1]
+source_root = str(root / "src")
+if source_root not in sys.path:
+    sys.path.insert(0, source_root)
 
 if not environ.get("APP_ENV") or environ.get("APP_ENV") == "local":
     from dotenv import load_dotenv

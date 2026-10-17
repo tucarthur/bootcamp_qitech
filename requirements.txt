@@ -19,3 +19,5 @@ psycopg2-binary==2.9.10
 # So os connectors (src/connectors/) podem usa-lo — nenhuma chamada
 # externa fica solta no meio do codigo.
 requests==2.32.3
+# A IANA database tambem e necessaria para ZoneInfo em plataformas sem tzdata do sistema.
+tzdata==2025.2

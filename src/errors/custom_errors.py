@@ -1,17 +1,6 @@
 from errors import QIException
 
 
-class DuplicatePixTransaction(QIException):
-    code = "QIT001008"
-
-    def __init__(self, transaction_id) -> None:
-        title = "PIX transaction already registered"
-        http_status = 409
-        description = f"There is already a PIX transaction with id {transaction_id}."
-        translation = "Já existe uma transação PIX com este identificador."
-        super().__init__(title, self.code, http_status, description, translation)
-
-
 class InvalidPixTransactionTimestamp(QIException):
     code = "QIT001009"
 
@@ -24,7 +13,7 @@ class InvalidPixTransactionTimestamp(QIException):
 
 
 class NotFoundPixTransactionAnalysis(QIException):
-    code = "QIT001010"
+    code = "QIT001008"
 
     def __init__(self, transaction_id) -> None:
         title = "PIX transaction analysis not found"

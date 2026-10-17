@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from controllers.base_controller import BaseController
 from errors import NotFoundPixTransactionAnalysis
 from repositories import PixTransactionAnalysisRepository
@@ -11,10 +13,18 @@ class PixTransactionAnalysisController(BaseController):
     def get_by_transaction_id(self, transaction_id: str) -> dict:
         analysis = self.pix_transaction_analysis_repository.get_by_transaction_id(transaction_id)
         if analysis is None:
+            try:
+                analysis_key = UUID(transaction_id)
+            except ValueError:
+                analysis_key = None
+            if analysis_key is not None:
+                analysis = self.pix_transaction_analysis_repository.get_by_key(analysis_key)
+
+        if analysis is None:
             raise NotFoundPixTransactionAnalysis(transaction_id)
 
         return {
-            "key": analysis.key,
+            "key": str(analysis.key),
             "status": analysis.status,
             "metadata": analysis.analysis_metadata,
         }
