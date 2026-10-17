@@ -5,7 +5,7 @@ from models.base import Base
 
 
 class PixTransactionAnalysis(Base):
-    __tablename__ = "pix_transaction_analysis"
+    __tablename__ = "pix_analysis"
 
     key = Column(UUID(as_uuid=True), primary_key=True)
     transaction_id = Column(

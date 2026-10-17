@@ -283,12 +283,47 @@ curl -X POST http://localhost:3000/pix/transaction \
 ```
 
 ```json
-{"id":"pix-000123"}
+{
+  "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
+  "status": "two_factor_required",
+  "metadata": {
+    "engine_version": "1",
+    "score": 5,
+    "thresholds": {"two_factor": 3, "reject": 8},
+    "rules_triggered": [
+      {
+        "rule": "night_over_limit",
+        "points": 2,
+        "block": false,
+        "reason": "CPF realizou 150000 centavos no horario noturno (hora local 22; limite 100000)."
+      },
+      {
+        "rule": "young_destination",
+        "points": 2,
+        "block": false,
+        "reason": "Conta de destino tem 7.55 dias (faixa abaixo de 30)."
+      },
+      {
+        "rule": "new_payee",
+        "points": 1,
+        "block": false,
+        "reason": "Nao ha movimentacao efetiva anterior para o favorecido 98765432100; valor de 150000 centavos."
+      }
+    ],
+    "rules_skipped": [
+      {"rule": "amount_vs_median", "reason": "Historico insuficiente: 0 de 5 movimentacoes efetivas."},
+      {"rule": "new_device", "reason": "Historico insuficiente: 0 de 3 tentativas do pagador."},
+      {"rule": "impossible_travel", "reason": "Historico insuficiente: nenhuma transacao anterior geolocalizada nas ultimas 24 horas."}
+    ]
+  }
+}
 ```
 
-A API responde **201** e grava os campos recebidos em `pix_transaction`.
-O `id` é único; enviar outra transação com o mesmo identificador responde
-**409**. O `amount` é armazenado como recebido, sem conversão de unidade.
+A API responde **201** com a análise e grava, na mesma transação de banco,
+a transação em `pix_transaction` e a decisão em `pix_analysis`. O `amount`
+é recebido em centavos, sem conversão. Reenviar um `id` já analisado
+responde **200** com a análise original: a requisição não atualiza nem
+recalcula a decisão.
 
 #### 8. Consultar uma análise PIX
 
@@ -297,15 +332,65 @@ curl http://localhost:3000/pix/transaction/pix-000123 \
   -H "INTERNAL-TOKEN: default_token"
 ```
 
-Quando já existe análise gravada, a resposta é **200**:
+O resultado da transação acima pode ser consultado com **200**:
 
 ```json
-{"key":"b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77","status":"two_factor_required","metadata":{}}
+{
+  "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
+  "status": "two_factor_required",
+  "metadata": {
+    "engine_version": "1",
+    "score": 5,
+    "thresholds": {"two_factor": 3, "reject": 8},
+    "rules_triggered": [
+      {"rule": "night_over_limit", "points": 2, "block": false, "reason": "CPF realizou 150000 centavos no horario noturno (hora local 22; limite 100000)."},
+      {"rule": "young_destination", "points": 2, "block": false, "reason": "Conta de destino tem 7.55 dias (faixa abaixo de 30)."},
+      {"rule": "new_payee", "points": 1, "block": false, "reason": "Nao ha movimentacao efetiva anterior para o favorecido 98765432100; valor de 150000 centavos."}
+    ],
+    "rules_skipped": [
+      {"rule": "amount_vs_median", "reason": "Historico insuficiente: 0 de 5 movimentacoes efetivas."},
+      {"rule": "new_device", "reason": "Historico insuficiente: 0 de 3 tentativas do pagador."},
+      {"rule": "impossible_travel", "reason": "Historico insuficiente: nenhuma transacao anterior geolocalizada nas ultimas 24 horas."}
+    ]
+  }
+}
 ```
 
-A consulta lê `pix_transaction_analysis`; enquanto não houver análise
-gravada para a transação, responde **404**. Ela não calcula nem escolhe
-um status: a regra antifraude que grava a análise será implementada depois.
+A consulta lê `pix_analysis` pelo identificador da transação; também aceita
+a chave UUID da análise. Uma transação inexistente responde **404**.
+
+#### Como a decisão antifraude é calculada
+
+O motor executa as 12 regras abaixo em ordem fixa, sempre usando a data da
+transação como referência temporal. O histórico só considera transações
+anteriores com data estritamente menor e exclui o próprio `id`. Tentativas
+incluem decisões rejeitadas; movimentações efetivas não. Valores são
+centavos, documentos são armazenados somente com dígitos (11 para CPF e
+14 para CNPJ), e a hora noturna usa `America/Sao_Paulo`.
+
+| Regra | Condição e efeito |
+|---|---|
+| `hard_ceiling` | Valor acima de 5.000.000 centavos bloqueia a transação. |
+| `night_over_limit` | Pagador CPF, hora local a partir das 20h ou antes das 6h e valor acima de 100.000: +2. |
+| `burst` | Pelo menos 5 tentativas do pagador nos 10 minutos anteriores, contando a atual: +3. A partir de 10, bloqueia em vez de pontuar. |
+| `rolling_24h_total` | Soma efetiva do pagador nas últimas 24 horas, incluindo a atual: acima de 1.000.000, +2; acima de 3.000.000, bloqueia. |
+| `amount_vs_median` | Com pelo menos 5 movimentações efetivas do pagador nos últimos 90 dias, compara com a mediana das até 50 mais recentes. Valor acima de 5 vezes a mediana e acima de 50.000: +2. |
+| `new_device` | Com pelo menos 3 tentativas anteriores do pagador nos últimos 90 dias, dispositivo ainda não visto e valor de pelo menos 20.000: +2. |
+| `young_payer_account` | Conta de origem com menos de 30 dias e valor acima de 100.000: +1. |
+| `impossible_travel` | Comparando com a transação anterior geolocalizada do pagador nas últimas 24 horas, distância de pelo menos 100 km e velocidade acima de 900 km/h: +3. O tempo mínimo usado no cálculo é um minuto. |
+| `young_destination` | Destino com menos de 7 dias e valor de pelo menos 50.000: +3; se tiver menos de 30 dias, +2. Apenas uma faixa pontua; abertura futura equivale a idade zero. |
+| `new_payee` | Sem movimentação efetiva anterior do pagador para o destino e valor de pelo menos 100.000: +1. |
+| `mule_fan_in` | Destino CPF que recebeu de pelo menos 5 CPFs distintos nas últimas 24 horas, contando a atual: +3. A partir de 10 pagadores, bloqueia. |
+| `shared_device` | Dispositivo usado por pelo menos 3 CPFs distintos nas últimas 24 horas, contando o atual: +3. |
+
+Pagamento para si mesmo (CPF/CNPJ de origem igual ao destino) não executa
+`young_destination`, `new_payee` nem `mule_fan_in`. O `metadata` contém
+`engine_version`, `score`, `thresholds` e `rules_triggered`; quando faltar
+histórico necessário, também contém `rules_skipped`. Uma regra que executou
+e não disparou não aparece nos metadados. Cada regra disparada inclui
+identificador, pontos, indicação de bloqueio e motivo observado. Qualquer
+bloqueio ou score de pelo menos 8 resulta em `rejected`; score de pelo
+menos 3 resulta em `two_factor_required`; abaixo disso, `approved`.
 
 E existe uma fronteira aqui que vale a pena enxergar cedo. Mande um CPF
 com o formato certo e os dígitos errados:
@@ -406,8 +491,8 @@ Nove endereços — este é o mapa inteiro da API:
 |---|---|---|
 | `GET /` | diz qual serviço é este | `200` + nome e id |
 | `GET /health_check` | diz se a API está de pé | `204`, sem corpo |
-| `GET /pix/transaction/{id}` | busca a análise gravada | `200` + análise ou `404` |
-| `POST /pix/transaction` | registra uma transação PIX | `201` + o `id` |
+| `GET /pix/transaction/{id}` | busca por identificador da transação ou UUID da análise | `200` + análise ou `404` |
+| `POST /pix/transaction` | analisa e registra uma transação PIX | `201` + análise; replay `200` |
 | `POST /sample_entity` | cria uma entidade | `201` + o `sample_entity_key` |
 | `GET /sample_entity/{key}` | busca uma entidade | `200` + a entidade |
 | `GET /sample_entities` | lista, de dez em dez, com filtros | `200` + a página |
@@ -725,6 +810,7 @@ Todo erro da API responde no mesmo formato, com um código próprio:
 | `QIT001005` | já existe um cadastro com esse e-mail            |
 | `QIT001006` | a pessoa é menor de idade                        |
 | `QIT001007` | a data de nascimento não existe no calendário    |
+| `QIT001008` | a análise da transação PIX não existe             |
 
 Um código estável vale mais que uma mensagem bonita: quem integra com a
 API programa em cima do código, não do texto.
@@ -735,8 +821,7 @@ Os números não são sorteados. Eles vêm em duas faixas:
   rota inexistente. Estão em `src/errors/base_error.py` e você não
   precisa mexer neles.
 - **`QIT001…`** — os erros das **regras deste projeto**. Estão em
-  `src/errors/custom_errors.py`, e é aí que os seus entram: o próximo
-  livre é o `QIT001008`.
+  `src/errors/custom_errors.py`.
 
 Não repita um número. Se repetir, a API **não sobe** — tem uma checagem
 no start (`error_verification`, em `src/errors/base_error.py`) que
