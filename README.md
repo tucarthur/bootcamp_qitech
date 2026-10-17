@@ -290,6 +290,23 @@ A API responde **201** e grava os campos recebidos em `pix_transaction`.
 O `id` é único; enviar outra transação com o mesmo identificador responde
 **409**. O `amount` é armazenado como recebido, sem conversão de unidade.
 
+#### 8. Consultar uma análise PIX
+
+```bash
+curl http://localhost:3000/pix/transaction/pix-000123 \
+  -H "INTERNAL-TOKEN: default_token"
+```
+
+Quando já existe análise gravada, a resposta é **200**:
+
+```json
+{"key":"b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77","status":"two_factor_required","metadata":{}}
+```
+
+A consulta lê `pix_transaction_analysis`; enquanto não houver análise
+gravada para a transação, responde **404**. Ela não calcula nem escolhe
+um status: a regra antifraude que grava a análise será implementada depois.
+
 E existe uma fronteira aqui que vale a pena enxergar cedo. Mande um CPF
 com o formato certo e os dígitos errados:
 
@@ -383,12 +400,13 @@ lições de segurança que cabem em cinco linhas.
 
 ### Todas as rotas
 
-Oito endereços — este é o mapa inteiro da API:
+Nove endereços — este é o mapa inteiro da API:
 
 | Método e rota | O que faz | Responde |
 |---|---|---|
 | `GET /` | diz qual serviço é este | `200` + nome e id |
 | `GET /health_check` | diz se a API está de pé | `204`, sem corpo |
+| `GET /pix/transaction/{id}` | busca a análise gravada | `200` + análise ou `404` |
 | `POST /pix/transaction` | registra uma transação PIX | `201` + o `id` |
 | `POST /sample_entity` | cria uma entidade | `201` + o `sample_entity_key` |
 | `GET /sample_entity/{key}` | busca uma entidade | `200` + a entidade |
@@ -396,7 +414,7 @@ Oito endereços — este é o mapa inteiro da API:
 | `PUT /sample_entity/{key}` | muda o status (`success` ou `failed`) | `202` + o `sample_entity_key` |
 | `PUT /webhook/sample_entity/{key}/increment_counter` | soma 1 no contador | `204`, sem corpo |
 
-As seis de baixo exigem o `INTERNAL-TOKEN` (seção 6). As duas de cima
+As sete de baixo exigem o `INTERNAL-TOKEN` (seção 6). As duas de cima
 são abertas — a primeira você já usou: foi ela que respondeu no
 navegador.
 

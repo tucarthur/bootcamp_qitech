@@ -23,6 +23,17 @@ class InvalidPixTransactionTimestamp(QIException):
         super().__init__(title, self.code, http_status, description, translation)
 
 
+class NotFoundPixTransactionAnalysis(QIException):
+    code = "QIT001010"
+
+    def __init__(self, transaction_id) -> None:
+        title = "PIX transaction analysis not found"
+        http_status = 404
+        description = f"No analysis has been recorded for PIX transaction {transaction_id}."
+        translation = "A análise da transação PIX ainda não foi registrada."
+        super().__init__(title, self.code, http_status, description, translation)
+
+
 class NotFoundSampleEntity(QIException):
     code = "QIT001001"
 

@@ -30,6 +30,16 @@ class RequestGenerator:
         return response.response_status, response.response_json
 
     @staticmethod
+    def GET_pix_transaction(transaction_id: str) -> BaseConnectorResponse:
+        response = ClientRequisition.send(
+            "GET",
+            f"/pix/transaction/{transaction_id}",
+            headers={"INTERNAL-TOKEN": INTERNAL_TOKEN},
+        )
+
+        return response.response_status, response.response_json
+
+    @staticmethod
     def GET_sample_entity(sample_entity_key: str) -> BaseConnectorResponse:
         response = ClientRequisition.send(
             "GET",

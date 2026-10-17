@@ -171,3 +171,12 @@ ON pix_transaction (source_ip);
 
 CREATE INDEX idx_pix_transaction_transaction_date
 ON pix_transaction (transaction_date);
+
+CREATE TABLE pix_transaction_analysis (
+    key                             UUID PRIMARY KEY,
+    transaction_id                  VARCHAR(200) NOT NULL UNIQUE
+                                        REFERENCES pix_transaction(id),
+    status                          VARCHAR(50) NOT NULL,
+    metadata                        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

@@ -1,6 +1,10 @@
+import json
 from uuid import uuid4
 
+from sqlalchemy import create_engine, text
+
 from tests.utils import RequestGenerator
+from tests.utils.db_utils import DbUtils
 
 
 def pix_transaction_payload() -> dict:
@@ -66,3 +70,49 @@ class TestPixTransactionCreate:
 
         assert status == 422
         assert response["code"] == "QIT001009"
+
+    def test_analysis_is_not_found_until_recorded(self):
+        payload = pix_transaction_payload()
+        status, _response = RequestGenerator.POST_pix_transaction(payload)
+        assert status == 201
+
+        status, response = RequestGenerator.GET_pix_transaction(payload["id"])
+
+        assert status == 404
+        assert response["code"] == "QIT001010"
+
+    def test_returns_recorded_analysis(self):
+        payload = pix_transaction_payload()
+        status, _response = RequestGenerator.POST_pix_transaction(payload)
+        assert status == 201
+
+        analysis_key = str(uuid4())
+        metadata = {"reason": "new_device"}
+        engine = create_engine(DbUtils.database_url())
+        try:
+            with engine.begin() as connection:
+                connection.execute(
+                    text(
+                        """
+                        INSERT INTO pix_transaction_analysis (key, transaction_id, status, metadata)
+                        VALUES (:key, :transaction_id, :status, CAST(:analysis_metadata AS JSONB))
+                        """
+                    ),
+                    {
+                        "key": analysis_key,
+                        "transaction_id": payload["id"],
+                        "status": "two_factor_required",
+                        "analysis_metadata": json.dumps(metadata),
+                    },
+                )
+        finally:
+            engine.dispose()
+
+        status, response = RequestGenerator.GET_pix_transaction(payload["id"])
+
+        assert status == 200
+        assert response == {
+            "key": analysis_key,
+            "status": "two_factor_required",
+            "metadata": metadata,
+        }

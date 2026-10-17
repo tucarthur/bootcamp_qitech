@@ -5,3 +5,4 @@ from repositories.account_repository import AccountRepository
 from repositories.bank_transaction_repository import BankTransactionRepository
 from repositories.ledger_entry_repository import LedgerEntryRepository
 from repositories.pix_transaction_repository import PixTransactionRepository
+from repositories.pix_transaction_analysis_repository import PixTransactionAnalysisRepository
