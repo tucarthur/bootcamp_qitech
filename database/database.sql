@@ -176,6 +176,12 @@ ON pix_transaction (source_document_number, transaction_date);
 CREATE INDEX idx_pix_transaction_destination_document_date
 ON pix_transaction (destination_document_number, transaction_date);
 
+CREATE INDEX idx_pix_transaction_source_received_at
+ON pix_transaction (source_document_number, received_at);
+
+CREATE INDEX idx_pix_transaction_destination_received_at
+ON pix_transaction (destination_document_number, received_at);
+
 CREATE INDEX idx_pix_transaction_payer_payee
 ON pix_transaction (source_document_number, destination_document_number);
 
@@ -200,4 +206,10 @@ CREATE TABLE pix_account_blacklist (
                                         REFERENCES pix_transaction(id),
     blacklisted_at                   TIMESTAMPTZ NOT NULL DEFAULT CLOCK_TIMESTAMP(),
     authenticated_at                 TIMESTAMPTZ
+);
+
+CREATE TABLE pix_payer_behavior_profile (
+    source_document_number           VARCHAR(14) PRIMARY KEY,
+    history_snapshot                 BYTEA NOT NULL,
+    updated_at                       TIMESTAMPTZ NOT NULL DEFAULT CLOCK_TIMESTAMP()
 );

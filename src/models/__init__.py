@@ -9,3 +9,4 @@ from models.ledger_entry import LedgerEntry
 from models.pix_transaction import PixTransaction
 from models.pix_transaction_analysis import PixTransactionAnalysis
 from models.pix_account_blacklist import PixAccountBlacklist
+from models.pix_payer_behavior_profile import PixPayerBehaviorProfile

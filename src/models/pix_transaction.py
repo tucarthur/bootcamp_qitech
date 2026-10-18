@@ -64,6 +64,16 @@ class PixTransaction(Base):
             "transaction_date",
         ),
         Index(
+            "idx_pix_transaction_source_received_at",
+            "source_document_number",
+            "received_at",
+        ),
+        Index(
+            "idx_pix_transaction_destination_received_at",
+            "destination_document_number",
+            "received_at",
+        ),
+        Index(
             "idx_pix_transaction_payer_payee",
             "source_document_number",
             "destination_document_number",

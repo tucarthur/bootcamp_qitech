@@ -1,7 +1,13 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from controllers.antifraud import POLICY, TransactionData, analyze
+from controllers.antifraud import (
+    POLICY,
+    ContextHistoryCounts,
+    TransactionData,
+    TreeEvasionCredit,
+    analyze,
+)
 
 
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=timezone(timedelta(hours=-3)))
@@ -88,6 +94,135 @@ def test_blacklisted_account_is_rejected_and_reports_authentication_requirement(
     assert blacklist_rule["points"] == 0
     assert blacklist_rule["requires_authentication"] is True
     assert "high_value_review" in triggered(result)
+
+
+def test_sql_context_counts_drive_mule_fan_in_and_shared_device_rules():
+    result = analyze(
+        transaction(),
+        [],
+        POLICY,
+        context_history_counts=ContextHistoryCounts(
+            distinct_payee_payers=POLICY.mule_fan_in_block_count - 1,
+            distinct_device_payers=POLICY.shared_device_min_payers - 1,
+        ),
+    )
+
+    rules = triggered(result)
+    assert result["status"] == "rejected"
+    assert rules["mule_fan_in"]["block"] is True
+    assert rules["shared_device"]["points"] == POLICY.shared_device_points
+
+
+def test_tree_evasion_blocks_exact_three_cpf_sweep_within_fifteen_seconds():
+    result = analyze(
+        transaction(
+            amount=1_000,
+            destination_document_number="98765432102",
+        ),
+        [],
+        POLICY,
+        tree_evasion_credits=[
+            TreeEvasionCredit(
+                amount=3_000,
+                received_at=NOW - timedelta(seconds=10),
+                prior_outgoing_amount=2_000,
+                prior_cpf_documents=("98765432100", "98765432101"),
+            )
+        ],
+    )
+
+    rule = triggered(result)["tree_evasion"]
+    assert result["status"] == "rejected"
+    assert rule["block"] is True
+    assert rule["points"] == 0
+
+
+def test_tree_evasion_uses_server_receipt_time_not_client_transaction_time():
+    result = analyze(
+        transaction(
+            amount=1_000,
+            transaction_date=NOW + timedelta(days=1),
+            received_at=NOW,
+            destination_document_number="98765432102",
+        ),
+        [],
+        POLICY,
+        tree_evasion_credits=[
+            TreeEvasionCredit(
+                amount=3_000,
+                received_at=NOW - timedelta(seconds=10),
+                prior_outgoing_amount=2_000,
+                prior_cpf_documents=("98765432100", "98765432101"),
+            )
+        ],
+    )
+
+    assert triggered(result)["tree_evasion"]["block"] is True
+
+
+def test_tree_evasion_requires_exact_full_balance_and_three_distinct_cpfs():
+    credits = [
+        TreeEvasionCredit(
+            amount=3_000,
+            received_at=NOW - timedelta(seconds=10),
+            prior_outgoing_amount=1_999,
+            prior_cpf_documents=("98765432100", "98765432101"),
+        ),
+        TreeEvasionCredit(
+            amount=3_000,
+            received_at=NOW - timedelta(seconds=10),
+            prior_outgoing_amount=2_000,
+            prior_cpf_documents=("98765432100",),
+        ),
+    ]
+
+    for credit in credits:
+        result = analyze(
+            transaction(amount=1_000, destination_document_number="98765432102"),
+            [],
+            POLICY,
+            tree_evasion_credits=[credit],
+        )
+        assert "tree_evasion" not in triggered(result)
+
+
+def test_tree_evasion_does_not_trigger_at_or_after_fifteen_seconds_or_for_cnpj():
+    for elapsed_seconds in (15, 16):
+        result = analyze(
+            transaction(
+                amount=1_000,
+                destination_document_number="98765432102",
+            ),
+            [],
+            POLICY,
+            tree_evasion_credits=[
+                TreeEvasionCredit(
+                    amount=3_000,
+                    received_at=NOW - timedelta(seconds=elapsed_seconds),
+                    prior_outgoing_amount=2_000,
+                    prior_cpf_documents=("98765432100", "98765432101"),
+                )
+            ],
+        )
+        assert "tree_evasion" not in triggered(result)
+
+    cnpj_result = analyze(
+        transaction(
+            amount=1_000,
+            destination_document_number="98765432000100",
+        ),
+        [],
+        POLICY,
+        tree_evasion_credits=[
+            TreeEvasionCredit(
+                amount=3_000,
+                received_at=NOW - timedelta(seconds=10),
+                prior_outgoing_amount=2_000,
+                prior_cpf_documents=("98765432100", "98765432101"),
+            )
+        ],
+    )
+    assert "tree_evasion" not in triggered(cnpj_result)
 
 
 def test_destination_amount_threshold_depends_on_document_type():

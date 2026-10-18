@@ -65,7 +65,7 @@ class TestPixTransactionCreate:
 
         assert status == 201
         assert response["status"] == "two_factor_required"
-        assert response["metadata"]["engine_version"] == "6"
+        assert response["metadata"]["engine_version"] == "7"
         assert response["metadata"]["score"] == 3
         assert response["metadata"]["thresholds"] == {
             "two_factor": 3,
@@ -85,7 +85,16 @@ class TestPixTransactionCreate:
                         """
                         SELECT
                             (SELECT count(*) FROM pix_transaction WHERE id = :transaction_id),
-                            (SELECT count(*) FROM pix_analysis WHERE transaction_id = :transaction_id)
+                            (SELECT count(*) FROM pix_analysis WHERE transaction_id = :transaction_id),
+                            (
+                                SELECT octet_length(history_snapshot)
+                                FROM pix_payer_behavior_profile
+                                WHERE source_document_number = (
+                                    SELECT source_document_number
+                                    FROM pix_transaction
+                                    WHERE id = :transaction_id
+                                )
+                            )
                         """
                     ),
                     {"transaction_id": payload["id"]},
@@ -102,7 +111,8 @@ class TestPixTransactionCreate:
                 ).one()
         finally:
             engine.dispose()
-        assert counts == (1, 1)
+        assert counts[:2] == (1, 1)
+        assert counts[2] > 0
         assert timestamps.received_at.utcoffset() is not None
         assert timestamps.received_at != timestamps.transaction_date
 
@@ -241,6 +251,42 @@ class TestPixTransactionCreate:
             item["rule"] != "account_blacklist"
             for item in authenticated_response["metadata"]["rules_triggered"]
         )
+
+    def test_tree_evasion_blocks_exact_balance_sweep_to_three_cpfs(self):
+        incoming = pix_transaction_payload()
+        payer_document = incoming["source_account"]["owner"]["document_number"]
+        base_date = datetime.fromisoformat(incoming["transaction_date"])
+        incoming["amount"] = 300_000
+        incoming["destination_account"]["owner"]["document_number"] = payer_document
+
+        status, _response = RequestGenerator.POST_pix_transaction(incoming)
+        assert status == 201
+
+        response = None
+        for index, payee_document in enumerate(
+            ("98765432100", "98765432101", "98765432102"),
+            start=1,
+        ):
+            outgoing = pix_transaction_payload()
+            outgoing["amount"] = 100_000
+            outgoing["transaction_date"] = (
+                base_date + timedelta(seconds=index)
+            ).isoformat()
+            outgoing["source_account"]["owner"]["document_number"] = payer_document
+            outgoing["destination_account"]["owner"]["document_number"] = (
+                payee_document
+            )
+
+            status, response = RequestGenerator.POST_pix_transaction(outgoing)
+            assert status == 201
+
+        assert response["status"] == "rejected"
+        tree_rule = next(
+            item
+            for item in response["metadata"]["rules_triggered"]
+            if item["rule"] == "tree_evasion"
+        )
+        assert tree_rule["block"] is True
 
     def test_refuses_invalid_nested_payload(self):
         payload = pix_transaction_payload()
