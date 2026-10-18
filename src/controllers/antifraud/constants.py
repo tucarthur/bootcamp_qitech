@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class AntifraudPolicy:
-    engine_version: str = "5"
+    engine_version: str = "6"
     timezone: str = "America/Sao_Paulo"
     earth_radius_km: float = 6371.0
 

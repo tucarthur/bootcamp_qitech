@@ -32,6 +32,8 @@ def analyze(
     transaction: TransactionData,
     history: list[TransactionData],
     policy: AntifraudPolicy,
+    *,
+    account_blacklisted: bool = False,
 ) -> dict:
     now = transaction.transaction_date
     if now.utcoffset() is None:
@@ -69,6 +71,7 @@ def analyze(
         *,
         block: bool = False,
         force_2fa: bool = False,
+        requires_authentication: bool = False,
         basis: str | None = None,
         limit: float | None = None,
     ) -> None:
@@ -84,6 +87,8 @@ def analyze(
         }
         if force_2fa:
             item["requires_2fa"] = True
+        if requires_authentication:
+            item["requires_authentication"] = True
         if basis is not None:
             item["basis"] = basis
         if limit is not None:
@@ -133,6 +138,16 @@ def analyze(
 
     payer_kind = document_kind(transaction.source_document_number)
     destination_kind = document_kind(transaction.destination_document_number)
+
+    if account_blacklisted:
+        trigger(
+            "account_blacklist",
+            0,
+            "Conta bloqueada apos uma rejeicao por atividade suspeita; "
+            "autenticacao e necessaria para liberar novas transacoes.",
+            block=True,
+            requires_authentication=True,
+        )
 
     # 1. Night limit
     local_hour = now.astimezone(ZoneInfo(policy.timezone)).hour

@@ -5,7 +5,11 @@ from sqlalchemy.exc import IntegrityError
 from controllers.antifraud import POLICY, analyze
 from controllers.base_controller import BaseController
 from errors import InvalidPixTransactionTimestamp
-from repositories import PixTransactionAnalysisRepository, PixTransactionRepository
+from repositories import (
+    PixAccountBlacklistRepository,
+    PixTransactionAnalysisRepository,
+    PixTransactionRepository,
+)
 
 
 class PixTransactionController(BaseController):
@@ -13,6 +17,7 @@ class PixTransactionController(BaseController):
         super().__init__(__name__)
         self.pix_transaction_repository = PixTransactionRepository(self.context)
         self.pix_transaction_analysis_repository = PixTransactionAnalysisRepository(self.context)
+        self.pix_account_blacklist_repository = PixAccountBlacklistRepository(self.context)
 
     def create(self, payload: dict) -> tuple[dict, bool]:
         transaction_id = payload["id"]
@@ -53,7 +58,15 @@ class PixTransactionController(BaseController):
             transaction_data = self.pix_transaction_repository.to_data(existing_transaction)
 
         history = self.pix_transaction_repository.get_history_for_analysis(transaction_data)
-        decision = analyze(transaction_data, history, POLICY)
+        account_blacklisted = self.pix_account_blacklist_repository.is_blacklisted(
+            transaction_data.source_document_number
+        )
+        decision = analyze(
+            transaction_data,
+            history,
+            POLICY,
+            account_blacklisted=account_blacklisted,
+        )
 
         if existing_transaction is None:
             self.pix_transaction_repository.create(
@@ -62,6 +75,11 @@ class PixTransactionController(BaseController):
                 received_at,
                 source_account_opening_date,
                 destination_account_opening_date,
+            )
+        if decision["status"] == "rejected" and not account_blacklisted:
+            self.pix_account_blacklist_repository.blacklist_account(
+                transaction_data.source_document_number,
+                transaction_id,
             )
         analysis = self.pix_transaction_analysis_repository.create(
             transaction_id,

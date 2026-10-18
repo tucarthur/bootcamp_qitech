@@ -7,6 +7,7 @@ from models.pix_transaction_analysis import PixTransactionAnalysis
 from sqlalchemy import and_, case, or_, text
 
 from controllers.antifraud import POLICY, TransactionData
+from repositories.antifraud_lock import normalize_document, payer_lock_key
 
 
 class PixTransactionRepository:
@@ -27,7 +28,7 @@ class PixTransactionRepository:
         destination_document_number = self._normalize_document(destination_document_number)
         lock_keys = {
             f"pix-antifraud:transaction:{transaction_id}",
-            f"pix-antifraud:payer:{source_document_number}",
+            payer_lock_key(source_document_number),
             f"pix-antifraud:device:{source_device_id}",
             f"pix-antifraud:payee:{destination_document_number}",
         }
@@ -205,4 +206,4 @@ class PixTransactionRepository:
 
     @staticmethod
     def _normalize_document(document_number: str) -> str:
-        return "".join(character for character in document_number if character.isdigit())
+        return normalize_document(document_number)

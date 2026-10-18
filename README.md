@@ -10,7 +10,7 @@ Motor antifraude de Pix. Uma API recebe o pedido de Pix e responde `approved`, `
 
 ### Em uma frase
 
-Cada Pix que chega passa por 14 regras independentes. Cada regra olha um sinal de risco (valor, horário, velocidade, histórico, conta de destino, dispositivo) e devolve **pontos**, um **bloqueio** ou uma **exigência de 2FA**. A soma dos pontos e esses sinais decidem: aprova, pede 2FA ou reprova. O que é "normal" vem, sempre que possível, do passado do próprio pagador.
+Cada Pix que chega passa por 14 regras independentes. Cada regra olha um sinal de risco (valor, horário, velocidade, histórico, conta de destino, dispositivo) e devolve **pontos**, um **bloqueio** ou uma **exigência de 2FA**. A soma dos pontos e esses sinais decidem: aprova, pede 2FA ou reprova. Além delas, uma proteção de estado bloqueia contas que já tiveram um Pix rejeitado por atividade suspeita. O que é "normal" vem, sempre que possível, do passado do próprio pagador.
 
 ### O caminho de um Pix
 
@@ -22,10 +22,11 @@ POST /pix/transaction
    ├─ 3. esse `id` já foi analisado? .................... sim → devolve a análise gravada (200)
    ├─ 4. grava a transação (documentos só com dígitos)
    ├─ 5. busca o histórico necessário (poucas consultas, com índice)
-   ├─ 6. roda as 14 regras → lista de (regra, pontos, motivo)
+   ├─ 6. roda as 14 regras e verifica o blacklist da conta
    ├─ 7. calcula a decisão (ver "Como as regras viram decisão")
-   ├─ 8. grava a análise: key, status e metadata
-   └─ 9. responde { key, status, metadata } ............. 201
+   ├─ 8. em caso de rejeição, ativa o blacklist na mesma transação do banco
+   ├─ 9. grava a análise: key, status e metadata
+   └─ 10. responde { key, status, metadata } ............ 201
 
 GET /pix/transaction/{id}   →   devolve a análise que foi gravada
 ```
@@ -57,12 +58,31 @@ GET /pix/transaction/{id}   →   devolve a análise que foi gravada
 
 ### Banco de dados
 
-Duas tabelas, em `database/database.sql`:
+Três tabelas, em `database/database.sql`:
 
 - `pix_transaction`: o que chegou (um registro por `id` de Pix, com o `id` único). Tem índices para as consultas de histórico: por pagador e data, por destinatário e data, por par pagador-destinatário e por dispositivo e data.
 - `pix_analysis`: o que decidimos (`key` UUID, `status` e `metadata` em JSON), uma por transação.
+- `pix_account_blacklist`: estado persistente por documento pagador. Guarda a transação que ativou o bloqueio; `authenticated_at` vazio significa que o bloqueio está ativo.
 
 Separar entrada e decisão permite reanalisar um Pix no futuro sem mexer no que foi recebido.
+
+### Bloqueio de conta comprometida
+
+Quando a análise rejeita um Pix por atividade suspeita, o documento do pagador entra no blacklist junto com a transação e a análise, no mesmo commit. Todo Pix novo desse documento é rejeitado, mesmo se as outras regras não encontrarem risco. Nas tentativas seguintes, a análise inclui a regra `account_blacklist` com `requires_authentication: true`.
+
+Não existe endpoint público para liberar uma conta. Depois de uma autenticação verificada por um sistema confiável, esse sistema pode chamar `PixAccountBlacklistRepository.clear_after_authentication(document_number)` e confirmar a transação do banco. O método serializa a liberação com a análise de Pix do mesmo pagador. Uma rejeição antifraude posterior pode ativar o bloqueio novamente.
+
+Exemplo do sinal devolvido enquanto o bloqueio está ativo:
+
+```json
+{
+  "rule": "account_blacklist",
+  "points": 0,
+  "block": true,
+  "requires_authentication": true,
+  "reason": "Conta bloqueada apos uma rejeicao por atividade suspeita; autenticacao e necessaria para liberar novas transacoes."
+}
+```
 
 ### Onde está o código
 
@@ -407,7 +427,7 @@ Todo Pix analisado devolve, junto do `status`, o porquê. Cada regra que disparo
   "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "1",
+    "engine_version": "6",
     "score": 5,
     "thresholds": { "two_factor": 3, "reject": 8, "warn_z": 3.0, "critical_z": 6.0 },
     "rules_triggered": [
@@ -436,7 +456,7 @@ Quando uma regra exige 2FA (`high_value_review` ou nível crítico de `rolling_2
   "key": "5c0e9a14-3b7d-4f26-8d1e-72a4b6c8e9f0",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "1",
+    "engine_version": "6",
     "score": 7,
     "thresholds": { "two_factor": 3, "reject": 8, "warn_z": 3.0, "critical_z": 6.0 },
     "rules_triggered": [

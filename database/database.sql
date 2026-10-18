@@ -193,3 +193,11 @@ CREATE TABLE pix_analysis (
     metadata                        JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE pix_account_blacklist (
+    source_document_number           VARCHAR(14) PRIMARY KEY,
+    triggering_transaction_id        VARCHAR(200) NOT NULL
+                                        REFERENCES pix_transaction(id),
+    blacklisted_at                   TIMESTAMPTZ NOT NULL DEFAULT CLOCK_TIMESTAMP(),
+    authenticated_at                 TIMESTAMPTZ
+);

@@ -4,6 +4,8 @@ from uuid import uuid4
 
 from sqlalchemy import create_engine, text
 
+from database import Context
+from repositories import PixAccountBlacklistRepository
 from tests.utils import RequestGenerator
 from tests.utils.db_utils import DbUtils
 
@@ -63,7 +65,7 @@ class TestPixTransactionCreate:
 
         assert status == 201
         assert response["status"] == "two_factor_required"
-        assert response["metadata"]["engine_version"] == "5"
+        assert response["metadata"]["engine_version"] == "6"
         assert response["metadata"]["score"] == 3
         assert response["metadata"]["thresholds"] == {
             "two_factor": 3,
@@ -174,6 +176,71 @@ class TestPixTransactionCreate:
             assert row.status == expected_status
             assert response_by_id[row.id] == expected_status
             prior_event_dates.append(row.transaction_date)
+
+    def test_rejected_account_stays_blocked_until_authenticated(self):
+        first = pix_transaction_payload()
+        payer_document = first["source_account"]["owner"]["document_number"]
+        device_id = first["source"]["device_id"]
+        last_date = datetime.fromisoformat(first["transaction_date"])
+
+        for index in range(10):
+            payload = pix_transaction_payload()
+            payload["amount"] = 1_000
+            payload["transaction_date"] = (
+                last_date + timedelta(seconds=index)
+            ).isoformat()
+            payload["source_account"]["owner"]["document_number"] = payer_document
+            payload["source"]["device_id"] = device_id
+
+            status, response = RequestGenerator.POST_pix_transaction(payload)
+            assert status == 201
+            if index == 9:
+                assert response["status"] == "rejected"
+
+        blocked_payload = pix_transaction_payload()
+        blocked_payload["source_account"]["owner"]["document_number"] = payer_document
+        blocked_payload["source"]["device_id"] = device_id
+        blocked_payload["transaction_date"] = (
+            last_date + timedelta(seconds=10)
+        ).isoformat()
+
+        status, blocked_response = RequestGenerator.POST_pix_transaction(blocked_payload)
+        assert status == 201
+        assert blocked_response["status"] == "rejected"
+        blocked_rule = next(
+            item
+            for item in blocked_response["metadata"]["rules_triggered"]
+            if item["rule"] == "account_blacklist"
+        )
+        assert blocked_rule["requires_authentication"] is True
+
+        context = Context()
+        try:
+            context.get_or_create_session()
+            blacklist_repository = PixAccountBlacklistRepository(context)
+            assert blacklist_repository.clear_after_authentication(payer_document)
+            context.db_session.commit()
+        finally:
+            if context.db_session is not None:
+                context.db_session.close()
+
+        authenticated_payload = pix_transaction_payload()
+        authenticated_payload["source_account"]["owner"]["document_number"] = (
+            payer_document
+        )
+        authenticated_payload["source"]["device_id"] = device_id
+        authenticated_payload["transaction_date"] = (
+            last_date + timedelta(minutes=11)
+        ).isoformat()
+        status, authenticated_response = RequestGenerator.POST_pix_transaction(
+            authenticated_payload
+        )
+        assert status == 201
+        assert authenticated_response["status"] != "rejected"
+        assert all(
+            item["rule"] != "account_blacklist"
+            for item in authenticated_response["metadata"]["rules_triggered"]
+        )
 
     def test_refuses_invalid_nested_payload(self):
         payload = pix_transaction_payload()

@@ -74,6 +74,22 @@ def test_high_value_fixed_thresholds_require_2fa_by_recipient_type():
     assert "high_value_review" not in triggered(cnpj_value_below_fixed_limit)
 
 
+def test_blacklisted_account_is_rejected_and_reports_authentication_requirement():
+    result = analyze(
+        transaction(amount=POLICY.high_value_fixed_ceiling_cents["cpf"] + 1),
+        [],
+        POLICY,
+        account_blacklisted=True,
+    )
+
+    blacklist_rule = triggered(result)["account_blacklist"]
+    assert result["status"] == "rejected"
+    assert blacklist_rule["block"] is True
+    assert blacklist_rule["points"] == 0
+    assert blacklist_rule["requires_authentication"] is True
+    assert "high_value_review" in triggered(result)
+
+
 def test_destination_amount_threshold_depends_on_document_type():
     cpf = analyze(
         transaction(amount=POLICY.destination_type_fixed_cents["cpf"]),
