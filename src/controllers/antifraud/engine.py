@@ -34,6 +34,14 @@ class ContextHistoryCounts:
     distinct_device_payers: int
 
 
+@dataclass(frozen=True)
+class TreeEvasionCredit:
+    amount: int
+    received_at: datetime
+    prior_outgoing_amount: int
+    prior_cpf_documents: tuple[str, ...]
+
+
 def analyze(
     transaction: TransactionData,
     history: list[TransactionData],
@@ -41,12 +49,20 @@ def analyze(
     *,
     account_blacklisted: bool = False,
     context_history_counts: ContextHistoryCounts | None = None,
+    tree_evasion_credits: list[TreeEvasionCredit] | None = None,
 ) -> dict:
     now = transaction.transaction_date
     if now.utcoffset() is None:
         raise ValueError("transaction_date must be timezone-aware")
+    if transaction.received_at.utcoffset() is None:
+        raise ValueError("received_at must be timezone-aware")
     if any(item.transaction_date.utcoffset() is None for item in history):
         raise ValueError("history transaction_date values must be timezone-aware")
+    if tree_evasion_credits is not None and any(
+        credit.received_at.utcoffset() is None
+        for credit in tree_evasion_credits
+    ):
+        raise ValueError("tree_evasion credit timestamps must be timezone-aware")
 
     history_cutoff = now - timedelta(days=policy.history_window_days)
     prior = [
@@ -620,7 +636,38 @@ def analyze(
     else:
         skip("mule_fan_in", "Regra aplicavel somente a destinatarios CPF.")
 
-    # 14. Shared device.
+    # 14. Tree evasion: the current outgoing Pix completes the exact sweep
+    # of an effective incoming Pix across at least three distinct CPFs.
+    if destination_kind != "cpf":
+        skip("tree_evasion", "A regra exige um destinatario CPF.")
+    else:
+        matching_credit = None
+        window = timedelta(seconds=policy.tree_evasion_window_seconds)
+        for credit in tree_evasion_credits or ():
+            elapsed = transaction.received_at - credit.received_at
+            if not timedelta(0) <= elapsed < window:
+                continue
+            recipients = set(credit.prior_cpf_documents)
+            recipients.add(transaction.destination_document_number)
+            if (
+                credit.prior_outgoing_amount + transaction.amount == credit.amount
+                and len(recipients) >= policy.tree_evasion_min_distinct_cpfs
+            ):
+                matching_credit = credit
+                break
+
+        if matching_credit is not None:
+            trigger(
+                "tree_evasion",
+                0,
+                f"Conta recebeu {matching_credit.amount} centavos e pulverizou "
+                f"o saldo integral em Pix para pelo menos "
+                f"{policy.tree_evasion_min_distinct_cpfs} CPFs distintos em menos "
+                f"de {policy.tree_evasion_window_seconds} segundos.",
+                block=True,
+            )
+
+    # 15. Shared device.
     shared_window = timedelta(hours=policy.shared_device_window_hours)
     device_documents = {
         item.source_document_number

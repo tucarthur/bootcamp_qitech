@@ -10,7 +10,7 @@ Motor antifraude de Pix. Uma API recebe o pedido de Pix e responde `approved`, `
 
 ### Em uma frase
 
-Cada Pix que chega passa por 14 regras independentes. Cada regra olha um sinal de risco (valor, horário, velocidade, histórico, conta de destino, dispositivo) e devolve **pontos**, um **bloqueio** ou uma **exigência de 2FA**. A soma dos pontos e esses sinais decidem: aprova, pede 2FA ou reprova. Além delas, uma proteção de estado bloqueia contas que já tiveram um Pix rejeitado por atividade suspeita. O que é "normal" vem, sempre que possível, do passado do próprio pagador.
+Cada Pix que chega passa por 15 regras independentes. Cada regra olha um sinal de risco (valor, horário, velocidade, histórico, conta de destino, dispositivo) e devolve **pontos**, um **bloqueio** ou uma **exigência de 2FA**. A soma dos pontos e esses sinais decidem: aprova, pede 2FA ou reprova. Além delas, uma proteção de estado bloqueia contas que já tiveram um Pix rejeitado por atividade suspeita. O que é "normal" vem, sempre que possível, do passado do próprio pagador.
 
 ### O caminho de um Pix
 
@@ -22,7 +22,7 @@ POST /pix/transaction
    ├─ 3. esse `id` já foi analisado? .................... sim → devolve a análise gravada (200)
    ├─ 4. grava a transação (documentos só com dígitos)
    ├─ 5. carrega o perfil compacto do pagador e busca contexto indexado
-   ├─ 6. roda as 14 regras e verifica o blacklist da conta
+   ├─ 6. roda as 15 regras e verifica o blacklist da conta
    ├─ 7. calcula a decisão (ver "Como as regras viram decisão")
    ├─ 8. em caso de rejeição, ativa o blacklist na mesma transação do banco
    ├─ 9. grava a análise: key, status e metadata
@@ -137,6 +137,7 @@ As regras marcadas com *(aprende)* calculam o limite a partir do histórico do p
 | `payee_burst` *(contraparte)* | Muitos pagamentos do pagador ao mesmo destinatário, em pouco tempo, **sem relacionamento anterior** entre os dois. | Janela 30 min; soma na janela ≥ R$ 1.000. Os mínimos CPF (3 / 5) e CNPJ (5 / 10) sobem para 2× / 4× a média de tentativas por janela histórica ativa quando há pelo menos 5 janelas anteriores; os mínimos fixos continuam como piso. Não dispara se o pagador já tinha Pix efetivos para esse destinatário **antes** da janela. | É o padrão de quem está sendo induzido a pagar várias vezes a um desconhecido (golpe do falso pagamento, falsa central). A conta de destino não precisa ser nova: o que importa é que o pagador não tem história com ela. Quem paga uma empresa várias vezes seguidas (compras no mesmo dia) é mais comum, por isso o limiar é maior para CNPJ. O piso de R$ 1.000 evita alerta por rachar uma conta de restaurante. |
 | `mule_fan_in` *(contraparte)* | Um CPF recebe de muitos pagadores diferentes em pouco tempo. | Destinatário CPF; janela 24h; ≥ 5 pagadores distintos **+3**; ≥ 10 **bloqueio**. | É o desenho de uma conta de laranja: junta dinheiro de várias vítimas. Só vale para CPF, porque uma empresa (CNPJ) recebe de muita gente legitimamente. |
 | `shared_device` *(contexto)* | O mesmo dispositivo é usado por vários pagadores diferentes. | Janela 24h; ≥ 3 pagadores distintos (contando o atual); **+3**. | Indica uma "fazenda de dispositivos" ou uma quadrilha operando várias contas do mesmo aparelho. |
+| `tree_evasion` *(evasão em árvore)* | O pagador recebe um Pix efetivo e, em menos de 15 segundos após o recebimento pelo servidor, pulveriza o saldo recebido em Pix para pelo menos 3 CPFs diferentes. | Janela estrita < 15 segundos; soma exata dos Pix efetivos enviados = valor recebido; destinatários CPF distintos ≥ 3; **bloqueio imediato**. A regra dispara no Pix que completa a pulverização. | Sinaliza uma conta central de passagem que encaminha integralmente o valor recebido para várias contas de laranja. A janela usa o horário de recebimento registrado pelo servidor, não o horário informado pelo cliente. Pix rejeitados não contam como entrada nem como saída efetiva. |
 
 ### Quem importa em cada regra: pagador ou destinatário
 
@@ -441,7 +442,7 @@ Todo Pix analisado devolve, junto do `status`, o porquê. Cada regra que disparo
   "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "6",
+    "engine_version": "7",
     "score": 5,
     "thresholds": { "two_factor": 3, "reject": 8, "warn_z": 3.0, "critical_z": 6.0 },
     "rules_triggered": [
@@ -470,7 +471,7 @@ Quando uma regra exige 2FA (`high_value_review` ou nível crítico de `rolling_2
   "key": "5c0e9a14-3b7d-4f26-8d1e-72a4b6c8e9f0",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "6",
+    "engine_version": "7",
     "score": 7,
     "thresholds": { "two_factor": 3, "reject": 8, "warn_z": 3.0, "critical_z": 6.0 },
     "rules_triggered": [

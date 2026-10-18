@@ -9,7 +9,12 @@ from models import PixPayerBehaviorProfile, PixTransaction
 from models.pix_transaction_analysis import PixTransactionAnalysis
 from sqlalchemy import and_, case, or_, text
 
-from controllers.antifraud import ContextHistoryCounts, POLICY, TransactionData
+from controllers.antifraud import (
+    ContextHistoryCounts,
+    POLICY,
+    TransactionData,
+    TreeEvasionCredit,
+)
 from repositories.antifraud_lock import normalize_document, payer_lock_key
 
 
@@ -18,6 +23,7 @@ class PixTransactionRepository:
         self.session = context.db_session
         self.history_source = "uninitialized"
         self.context_history_counts: ContextHistoryCounts | None = None
+        self.tree_evasion_credits: list[TreeEvasionCredit] = []
         self._behavior_profile: PixPayerBehaviorProfile | None = None
         self._profile_snapshot: list[dict] = []
 
@@ -47,6 +53,78 @@ class PixTransactionRepository:
 
     def get_database_timestamp(self) -> datetime:
         return self.session.execute(text("SELECT clock_timestamp()")).scalar_one()
+
+    def get_tree_evasion_credits(
+        self,
+        transaction: TransactionData,
+    ) -> list[TreeEvasionCredit]:
+        if len(transaction.destination_document_number) != POLICY.cpf_digits:
+            self.tree_evasion_credits = []
+            return self.tree_evasion_credits
+
+        window = timedelta(seconds=POLICY.tree_evasion_window_seconds)
+        received_at = transaction.received_at
+        rows = self.session.execute(
+            text(
+                """
+                SELECT
+                    incoming.amount,
+                    incoming.received_at,
+                    COALESCE(SUM(outgoing.amount), 0) AS prior_outgoing_amount,
+                    COALESCE(
+                        ARRAY_AGG(DISTINCT outgoing.destination_document_number)
+                            FILTER (WHERE outgoing.id IS NOT NULL),
+                        ARRAY[]::VARCHAR[]
+                    ) AS prior_cpf_documents
+                FROM pix_transaction AS incoming
+                JOIN pix_analysis AS incoming_analysis
+                    ON incoming_analysis.transaction_id = incoming.id
+                    AND incoming_analysis.status != 'rejected'
+                LEFT JOIN (
+                    SELECT
+                        transfer.id,
+                        transfer.amount,
+                        transfer.received_at,
+                        transfer.destination_document_number
+                    FROM pix_transaction AS transfer
+                    JOIN pix_analysis AS transfer_analysis
+                        ON transfer_analysis.transaction_id = transfer.id
+                        AND transfer_analysis.status != 'rejected'
+                    WHERE transfer.source_document_number = :source_document_number
+                        AND transfer.destination_document_number ~ '^[0-9]{11}$'
+                        AND transfer.destination_document_number
+                            != :source_document_number
+                        AND transfer.received_at >= :window_cutoff
+                        AND transfer.received_at < :received_at
+                ) AS outgoing
+                    ON outgoing.received_at >= incoming.received_at
+                    AND outgoing.received_at < incoming.received_at
+                        + make_interval(secs => :window_seconds)
+                    AND outgoing.received_at < :received_at
+                WHERE incoming.destination_document_number = :source_document_number
+                    AND incoming.received_at
+                        > :received_at - make_interval(secs => :window_seconds)
+                    AND incoming.received_at < :received_at
+                GROUP BY incoming.id, incoming.amount, incoming.received_at
+                """
+            ),
+            {
+                "source_document_number": transaction.source_document_number,
+                "received_at": received_at,
+                "window_cutoff": received_at - window,
+                "window_seconds": POLICY.tree_evasion_window_seconds,
+            },
+        ).all()
+        self.tree_evasion_credits = [
+            TreeEvasionCredit(
+                amount=row.amount,
+                received_at=row.received_at,
+                prior_outgoing_amount=row.prior_outgoing_amount,
+                prior_cpf_documents=tuple(row.prior_cpf_documents),
+            )
+            for row in rows
+        ]
+        return self.tree_evasion_credits
 
     def get_history_for_analysis(self, transaction: TransactionData) -> list[TransactionData]:
         payer_document = transaction.source_document_number

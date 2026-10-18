@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class AntifraudPolicy:
-    engine_version: str = "6"
+    engine_version: str = "7"
     timezone: str = "America/Sao_Paulo"
     earth_radius_km: float = 6371.0
 
@@ -117,6 +117,9 @@ class AntifraudPolicy:
     shared_device_window_hours: int = 24
     shared_device_min_payers: int = 3
     shared_device_points: int = 3
+
+    tree_evasion_window_seconds: int = 15
+    tree_evasion_min_distinct_cpfs: int = 3
 
     two_factor_score: int = 3
     reject_score: int = 8

@@ -176,6 +176,12 @@ ON pix_transaction (source_document_number, transaction_date);
 CREATE INDEX idx_pix_transaction_destination_document_date
 ON pix_transaction (destination_document_number, transaction_date);
 
+CREATE INDEX idx_pix_transaction_source_received_at
+ON pix_transaction (source_document_number, received_at);
+
+CREATE INDEX idx_pix_transaction_destination_received_at
+ON pix_transaction (destination_document_number, received_at);
+
 CREATE INDEX idx_pix_transaction_payer_payee
 ON pix_transaction (source_document_number, destination_document_number);
 

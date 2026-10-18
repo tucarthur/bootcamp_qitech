@@ -63,6 +63,9 @@ class PixTransactionController(BaseController):
 
         history_started_at = perf_counter()
         history = self.pix_transaction_repository.get_history_for_analysis(transaction_data)
+        tree_evasion_credits = (
+            self.pix_transaction_repository.get_tree_evasion_credits(transaction_data)
+        )
         history_ms = (perf_counter() - history_started_at) * 1000
         account_blacklisted = self.pix_account_blacklist_repository.is_blacklisted(
             transaction_data.source_document_number
@@ -76,6 +79,7 @@ class PixTransactionController(BaseController):
             context_history_counts=(
                 self.pix_transaction_repository.context_history_counts
             ),
+            tree_evasion_credits=tree_evasion_credits,
         )
         analysis_ms = (perf_counter() - analysis_started_at) * 1000
 
