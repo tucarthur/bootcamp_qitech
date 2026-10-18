@@ -184,6 +184,7 @@ def analyze(
             policy.night_points,
             f"CPF realizou {transaction.amount} centavos no horario noturno "
             f"(hora local {local_hour}; limite {policy.night_amount_cents}).",
+            block=True,
         )
 
     # 2. Amount anomaly against all effective payer transfers
@@ -393,6 +394,9 @@ def analyze(
                 limit=daily_profile.value,
             )
 
+    new_device_detected = False
+    impossible_travel_detected = False
+
     # 7. New device uses all attempts in the profile window.
     device_attempts = [
         item
@@ -411,6 +415,7 @@ def analyze(
         transaction.amount >= policy.new_device_min_amount_cents
         and all(item.source_device_id != transaction.source_device_id for item in device_attempts)
     ):
+        new_device_detected = True
         trigger(
             "new_device",
             policy.new_device_points,
@@ -472,12 +477,22 @@ def analyze(
             distance >= policy.impossible_travel_min_distance_km
             and speed > policy.impossible_travel_min_speed_kmh
         ):
+            impossible_travel_detected = True
             trigger(
                 "impossible_travel",
                 policy.impossible_travel_points,
                 f"Deslocamento de {distance:.1f} km a {speed:.1f} km/h "
                 "em menos de 24 horas.",
             )
+
+    if new_device_detected and impossible_travel_detected:
+        trigger(
+            "new_device_impossible_travel",
+            0,
+            "Dispositivo novo e deslocamento impossivel ocorreram na mesma "
+            "transacao; rejeicao imediata.",
+            block=True,
+        )
 
     # 10. Young destination.
     if self_payment:

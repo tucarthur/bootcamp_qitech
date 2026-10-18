@@ -96,9 +96,12 @@ class PixTransactionController(BaseController):
             transaction_data,
             decision["status"],
         )
-        if decision["status"] == "rejected" and not account_blacklisted:
+        if decision["status"] == "rejected" and any(
+            item["rule"] == "mule_fan_in" and item["block"]
+            for item in decision["metadata"]["rules_triggered"]
+        ):
             self.pix_account_blacklist_repository.blacklist_account(
-                transaction_data.source_document_number,
+                transaction_data.destination_document_number,
                 transaction_id,
             )
         analysis = self.pix_transaction_analysis_repository.create(
