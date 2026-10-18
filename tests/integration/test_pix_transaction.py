@@ -4,6 +4,7 @@ from uuid import uuid4
 
 from sqlalchemy import create_engine, text
 
+from controllers.antifraud.constants import POLICY
 from database import Context
 from repositories import PixAccountBlacklistRepository
 from tests.utils import RequestGenerator
@@ -65,7 +66,7 @@ class TestPixTransactionCreate:
 
         assert status == 201
         assert response["status"] == "two_factor_required"
-        assert response["metadata"]["engine_version"] == "7"
+        assert response["metadata"]["engine_version"] == "8"
         assert response["metadata"]["score"] == 3
         assert response["metadata"]["thresholds"] == {
             "two_factor": 3,
@@ -187,7 +188,7 @@ class TestPixTransactionCreate:
             assert response_by_id[row.id] == expected_status
             prior_event_dates.append(row.transaction_date)
 
-    def test_rejected_account_stays_blocked_until_authenticated(self):
+    def test_non_counterpart_rejection_does_not_blacklist_payer(self):
         first = pix_transaction_payload()
         payer_document = first["source_account"]["owner"]["document_number"]
         device_id = first["source"]["device_id"]
@@ -207,28 +208,66 @@ class TestPixTransactionCreate:
             if index == 9:
                 assert response["status"] == "rejected"
 
+        follow_up = pix_transaction_payload()
+        follow_up["amount"] = 1_000
+        follow_up["source_account"]["owner"]["document_number"] = payer_document
+        follow_up["source"]["device_id"] = device_id
+        follow_up["transaction_date"] = (last_date + timedelta(seconds=10)).isoformat()
+
+        status, response = RequestGenerator.POST_pix_transaction(follow_up)
+        assert status == 201
+        assert response["status"] == "rejected"
+        assert all(
+            item["rule"] != "account_blacklist"
+            for item in response["metadata"]["rules_triggered"]
+        )
+
+    def test_mule_fan_in_blacklists_flagged_destination_until_authenticated(self):
+        first = pix_transaction_payload()
+        flagged_document = first["destination_account"]["owner"]["document_number"]
+        device_id = f"dvc-{uuid4()}"
+        base_date = datetime.fromisoformat(first["transaction_date"])
+
+        for index in range(POLICY.mule_fan_in_block_count):
+            payload = pix_transaction_payload()
+            payload["transaction_date"] = (
+                base_date + timedelta(seconds=index)
+            ).isoformat()
+            payload["destination_account"]["owner"]["document_number"] = (
+                flagged_document
+            )
+
+            status, response = RequestGenerator.POST_pix_transaction(payload)
+            assert status == 201
+
+        assert response["status"] == "rejected"
+        mule_rule = next(
+            item
+            for item in response["metadata"]["rules_triggered"]
+            if item["rule"] == "mule_fan_in"
+        )
+        assert mule_rule["block"] is True
+
         blocked_payload = pix_transaction_payload()
-        blocked_payload["source_account"]["owner"]["document_number"] = payer_document
+        blocked_payload["source_account"]["owner"]["document_number"] = flagged_document
         blocked_payload["source"]["device_id"] = device_id
         blocked_payload["transaction_date"] = (
-            last_date + timedelta(seconds=10)
+            base_date + timedelta(seconds=POLICY.mule_fan_in_block_count)
         ).isoformat()
-
         status, blocked_response = RequestGenerator.POST_pix_transaction(blocked_payload)
         assert status == 201
         assert blocked_response["status"] == "rejected"
-        blocked_rule = next(
-            item
+        assert any(
+            item["rule"] == "account_blacklist"
+            and item["requires_authentication"] is True
             for item in blocked_response["metadata"]["rules_triggered"]
-            if item["rule"] == "account_blacklist"
         )
-        assert blocked_rule["requires_authentication"] is True
 
         context = Context()
         try:
             context.get_or_create_session()
             blacklist_repository = PixAccountBlacklistRepository(context)
-            assert blacklist_repository.clear_after_authentication(payer_document)
+            assert blacklist_repository.clear_after_authentication(flagged_document)
             context.db_session.commit()
         finally:
             if context.db_session is not None:
@@ -236,11 +275,11 @@ class TestPixTransactionCreate:
 
         authenticated_payload = pix_transaction_payload()
         authenticated_payload["source_account"]["owner"]["document_number"] = (
-            payer_document
+            flagged_document
         )
         authenticated_payload["source"]["device_id"] = device_id
         authenticated_payload["transaction_date"] = (
-            last_date + timedelta(minutes=11)
+            base_date + timedelta(minutes=11)
         ).isoformat()
         status, authenticated_response = RequestGenerator.POST_pix_transaction(
             authenticated_payload

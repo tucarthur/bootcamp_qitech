@@ -10,7 +10,7 @@ Motor antifraude de Pix. Uma API recebe o pedido de Pix e responde `approved`, `
 
 ### Em uma frase
 
-Cada Pix que chega passa por 15 regras independentes. Cada regra olha um sinal de risco (valor, horário, velocidade, histórico, conta de destino, dispositivo) e devolve **pontos**, um **bloqueio** ou uma **exigência de 2FA**. A soma dos pontos e esses sinais decidem: aprova, pede 2FA ou reprova. Além delas, uma proteção de estado bloqueia contas que já tiveram um Pix rejeitado por atividade suspeita. O que é "normal" vem, sempre que possível, do passado do próprio pagador.
+Cada Pix que chega passa por 16 regras e subregras. Cada uma olha um sinal de risco (valor, horário, velocidade, histórico, conta de destino, dispositivo) e devolve **pontos**, um **bloqueio** ou uma **exigência de 2FA**. A soma dos pontos e esses sinais decidem: aprova, pede 2FA ou reprova. Além delas, uma proteção de estado bloqueia destinatários identificados como contas de passagem pela regra `mule_fan_in`, até autenticação. O que é "normal" vem, sempre que possível, do passado do próprio pagador.
 
 ### O caminho de um Pix
 
@@ -22,9 +22,9 @@ POST /pix/transaction
    ├─ 3. esse `id` já foi analisado? .................... sim → devolve a análise gravada (200)
    ├─ 4. grava a transação (documentos só com dígitos)
    ├─ 5. carrega o perfil compacto do pagador e busca contexto indexado
-   ├─ 6. roda as 15 regras e verifica o blacklist da conta
+   ├─ 6. roda as 16 regras e verifica o blacklist da conta pagadora
    ├─ 7. calcula a decisão (ver "Como as regras viram decisão")
-   ├─ 8. em caso de rejeição, ativa o blacklist na mesma transação do banco
+   ├─ 8. se `mule_fan_in` identificar o destinatário numa rejeição, ativa o blacklist dele no mesmo commit
    ├─ 9. grava a análise: key, status e metadata
    └─ 10. responde { key, status, metadata } ............ 201
 
@@ -62,14 +62,14 @@ Quatro tabelas, em `database/database.sql`:
 
 - `pix_transaction`: o que chegou (um registro por `id` de Pix, com o `id` único). Tem índices para as consultas de histórico: por pagador e data, por destinatário e data, por par pagador-destinatário e por dispositivo e data.
 - `pix_analysis`: o que decidimos (`key` UUID, `status` e `metadata` em JSON), uma por transação.
-- `pix_account_blacklist`: estado persistente por documento pagador. Guarda a transação que ativou o bloqueio; `authenticated_at` vazio significa que o bloqueio está ativo.
+- `pix_account_blacklist`: estado persistente por documento da conta sinalizada. Guarda a transação que ativou o bloqueio; `authenticated_at` vazio significa que o bloqueio está ativo.
 - `pix_payer_behavior_profile`: snapshot comprimido e limitado às 500 transações mais recentes de cada pagador, usado para evitar reler o histórico inteiro em cada Pix.
 
 Separar entrada e decisão permite reanalisar um Pix no futuro sem mexer no que foi recebido.
 
 ### Bloqueio de conta comprometida
 
-Quando a análise rejeita um Pix por atividade suspeita, o documento do pagador entra no blacklist junto com a transação e a análise, no mesmo commit. Todo Pix novo desse documento é rejeitado, mesmo se as outras regras não encontrarem risco. Nas tentativas seguintes, a análise inclui a regra `account_blacklist` com `requires_authentication: true`.
+Somente uma rejeição causada por um bloqueio efetivo de `mule_fan_in` (`block: true`) ativa o blacklist, e o documento bloqueado é o do **destinatário** sinalizado como conta de passagem (não o pagador que tentou enviar para ele). Um alerta de `mule_fan_in` sem bloqueio não basta. O registro é gravado junto com a transação e a análise, no mesmo commit. Quando esse destinatário iniciar Pix como pagador, será rejeitado até autenticação, e a análise incluirá `account_blacklist` com `requires_authentication: true`. Rejeições por outras regras, incluindo `night_over_limit`, não ativam o blacklist.
 
 Não existe endpoint público para liberar uma conta. Depois de uma autenticação verificada por um sistema confiável, esse sistema pode chamar `PixAccountBlacklistRepository.clear_after_authentication(document_number)` e confirmar a transação do banco. O método serializa a liberação com a análise de Pix do mesmo pagador. Uma rejeição antifraude posterior pode ativar o bloqueio novamente.
 
@@ -123,7 +123,7 @@ As regras marcadas com *(aprende)* calculam o limite a partir do histórico do p
 
 | Regra | Lógica | Parâmetros | Por quê |
 |---|---|---|---|
-| `night_over_limit` *(limite)* | Pagador pessoa física (CPF) paga acima do limite noturno entre 20h e 6h. | Janela 20h–6h; limite R$ 1.000; **+2**. | Espelha o limite noturno padrão do Banco Central para pessoas físicas, que o cliente pode alterar. Vale só 2 pontos porque ele pode ter aumentado o limite de propósito. Sozinha não pede 2FA. |
+| `night_over_limit` *(limite)* | Pagador pessoa física (CPF) paga acima do limite noturno entre 20h e 6h. | Janela 20h–6h; limite R$ 1.000; **+2 e rejeição imediata**. | Espelha o limite noturno padrão do Banco Central para pessoas físicas. Acima do limite, o Pix é rejeitado independentemente da pontuação total. |
 | `amount_vs_median` *(perfil, aprende)* | O valor está muito acima do que o pagador costuma enviar. | Base: valores dos Pix efetivos do pagador (90 dias, até 50). Mínimo 5. Limite = mediana + 3 × escala robusta; piso R$ 500; **+2**. Sem histórico: regra pulada. | Não compara um valor bruto com um múltiplo arbitrário da mediana. A mediana representa o centro; a escala robusta (baseada no MAD, desvio absoluto mediano) estima a dispersão sem ser distorcida por Pix extremos. Para um valor individual, o erro-padrão da média não é a escala correta: ele mede a incerteza da estimativa do centro e diminui com mais amostras, podendo sinalizar operações normais como anômalas. |
 | `high_value_review` *(valor crítico, aprende)* | **Caso crítico de `amount_vs_median`**: o valor é extremo para este pagador e alto em termos absolutos. | Mesma base. Limite = mediana + 6 × escala robusta; piso por tipo de destinatário: **CPF** R$ 5.000, **CNPJ** R$ 20.000. Sem histórico: teto fixo, **CPF** R$ 30.000, **CNPJ** R$ 100.000. Efeito: **exige 2FA**, mesmo com pontuação baixa. | Um valor muito acima do habitual pode ser legítimo e importante; bloquear automaticamente pode causar dano ao cliente. Em vez de rejeitar, o cliente confirma que é ele mesmo com 2FA. O piso evita pedir 2FA por um valor pequeno só porque o pagador é muito regular. O teto fixo só vale quando não há passado. |
 | `destination_type_amount` *(contraparte, aprende)* | O valor é elevado para o tipo de destinatário (CPF ou CNPJ). | Base: Pix efetivos do pagador para destinatários **do mesmo tipo** (90 dias, até 50). Mínimo 5. Limite = mediana + 3 × escala robusta; piso **CPF** R$ 1.000, **CNPJ** R$ 5.000; pontos **CPF +3**, **CNPJ +2**. Sem histórico daquele tipo: **CPF** ≥ R$ 10.000, **CNPJ** ≥ R$ 50.000. | Uma transferência para uma pessoa física merece mais escrutínio do que o mesmo valor para uma empresa, que pode estar pagando fornecedores ou despesas operacionais. Quem sempre paga empresas e agora manda para um CPF não tem histórico com CPFs: vale o valor fixo. É um sinal de risco, não uma rejeição automática. |
@@ -132,6 +132,7 @@ As regras marcadas com *(aprende)* calculam o limite a partir do histórico do p
 | `new_device` *(perfil)* | Primeira vez que o pagador usa este dispositivo. | Pagador com ≥ 3 Pix em 90 dias; `device_id` inédito; valor ≥ R$ 200; **+2**. | Sinal clássico de conta tomada. Só vale se já existe um dispositivo habitual. No primeiro Pix de alguém tudo é "novo". |
 | `young_payer_account` *(perfil)* | Conta de origem aberta há pouco tempo movimenta valor alto. | Idade < 30 dias; valor > R$ 1.000; **+1**. | Contas recém-abertas que enviam muito dinheiro são padrão de identidade falsa ou conta de passagem. Sinal fraco. |
 | `impossible_travel` *(perfil)* | Dois Pix do mesmo pagador em lugares tão distantes que o deslocamento seria impossível. | Pix anterior com geolocalização nas últimas 24h; distância ≥ 100 km; velocidade > 900 km/h; **+3**. | Indica que a sessão ou o dispositivo não são da mesma pessoa. O piso de 100 km evita falso alarme por imprecisão de GPS. |
+| `new_device_impossible_travel` *(subregra de bloqueio)* | `new_device` e `impossible_travel` disparam no mesmo Pix. | **0 pontos; rejeição imediata**. | A combinação de dispositivo inédito e deslocamento impossível é evidência forte o suficiente para rejeitar sem depender da soma de pontos. |
 | `young_destination` *(contraparte)* | A conta que recebe foi aberta há pouco tempo. | Valor ≥ R$ 500; idade < 7 dias **+3**; idade < 30 dias **+2**. | Contas de laranja são abertas pouco antes de serem usadas. Quanto mais nova, maior o risco. |
 | `new_payee` *(contraparte)* | Primeira vez que este pagador paga este destinatário. | Valor ≥ R$ 1.000; **+1**. | Sinal fraco: serve de desempate junto com outros. Sozinho não incomoda ninguém. |
 | `payee_burst` *(contraparte)* | Muitos pagamentos do pagador ao mesmo destinatário, em pouco tempo, **sem relacionamento anterior** entre os dois. | Janela 30 min; soma na janela ≥ R$ 1.000. Os mínimos CPF (3 / 5) e CNPJ (5 / 10) sobem para 2× / 4× a média de tentativas por janela histórica ativa quando há pelo menos 5 janelas anteriores; os mínimos fixos continuam como piso. Não dispara se o pagador já tinha Pix efetivos para esse destinatário **antes** da janela. | É o padrão de quem está sendo induzido a pagar várias vezes a um desconhecido (golpe do falso pagamento, falsa central). A conta de destino não precisa ser nova: o que importa é que o pagador não tem história com ela. Quem paga uma empresa várias vezes seguidas (compras no mesmo dia) é mais comum, por isso o limiar é maior para CNPJ. O piso de R$ 1.000 evita alerta por rachar uma conta de restaurante. |
@@ -143,8 +144,8 @@ As regras marcadas com *(aprende)* calculam o limite a partir do histórico do p
 
 | Tipo que decide os limites | Regras |
 |---|---|
-| **Destinatário** (para quem vai o dinheiro) | `high_value_review`, `destination_type_amount`, `payee_burst`, `mule_fan_in` (só CPF) |
-| **Pagador** (quem envia) | `burst`, `rolling_24h_total`, `night_over_limit` (só CPF) |
+| **Destinatário** (para quem vai o dinheiro) | `high_value_review`, `destination_type_amount`, `payee_burst`, `mule_fan_in` (só CPF), `tree_evasion` |
+| **Pagador** (quem envia) | `burst`, `rolling_24h_total`, `night_over_limit` (só CPF), `new_device_impossible_travel` |
 
 ### Limites que aprendem com o pagador
 
@@ -372,7 +373,7 @@ O caminho de calibração seria: guardar cada decisão, cruzar com as fraudes co
 
 | Condição | Decisão | Quando acontece |
 |---|---|---|
-| alguma regra **bloqueou** (`burst` ou `mule_fan_in`) | `rejected` | o risco é claro por si só: rajada muito acima do normal do pagador ou uma conta que junta dinheiro de muitas vítimas. |
+| alguma regra **bloqueou** (`burst`, `mule_fan_in`, `night_over_limit`, `new_device_impossible_travel` ou `tree_evasion`) | `rejected` | o risco é claro por si só: rajada extrema, limite noturno excedido, dispositivo novo combinado com viagem impossível, conta que junta dinheiro de muitas vítimas ou pulverização integral de um crédito. |
 | pontuação **≥ 8** | `rejected` | vários sinais fortes juntos: não há dúvida razoável. |
 | alguma regra **exigiu 2FA** (`high_value_review` ou nível crítico de `rolling_24h_total`) **ou** pontuação **≥ 3** | `two_factor_required` | valor extremo sempre pede 2FA, mesmo com pontuação baixa; nos demais casos, há dúvida e o cliente precisa confirmar a identidade. |
 | pontuação **< 3** | `approved` | segue normal, sem fricção. |
@@ -382,7 +383,7 @@ O caminho de calibração seria: guardar cada decisão, cruzar com as fraudes co
 A régua dos pesos é simples e vale para todas as regras:
 
 - **+3 (sinal forte):** sozinho já pede 2FA. É o caso de rajada, destinatário que junta dinheiro de muitos, dispositivo compartilhado, viagem impossível, conta de destino com menos de 7 dias, valor atípico para um destinatário pessoa física e muitos pagamentos seguidos a um desconhecido.
-- **+2 (sinal médio):** precisa de companhia. Dois sinais médios, ou um médio e um fraco, pedem 2FA.
+- **+2 (sinal médio):** normalmente precisa de companhia. Dois sinais médios, ou um médio e um fraco, pedem 2FA; `night_over_limit` é exceção e rejeita imediatamente.
 - **+1 (sinal fraco):** só ajuda a desempatar.
 
 O limiar de reprovar (8) equivale a cerca de três sinais fortes ao mesmo tempo. É de propósito alto: reprovar um cliente bom custa caro. Valor alto, por si só, não soma pontos nem causa rejeição: força o 2FA.
@@ -391,23 +392,21 @@ O limiar de reprovar (8) equivale a cerca de três sinais fortes ao mesmo tempo.
 
 **Aprovado.** Pix de R$ 150,00 às 14h, para alguém que o cliente já pagou antes, com conta antiga e comportamento normal. Nenhuma regra dispara: pontuação 0.
 
-**2FA (o Pix do exemplo do desafio).** R$ 1.500,00 às 22h15, de uma conta aberta em 2025, para uma conta aberta 7 dias antes, sem histórico do pagador:
+**2FA (o Pix do exemplo do desafio).** R$ 1.500,00 às 15h15, de uma conta aberta em 2025, para uma conta aberta 7 dias antes, sem histórico do pagador:
 
 | Regra | Resultado |
 |---|---|
-| `night_over_limit` | R$ 1.500 > R$ 1.000 em horário noturno: +2 |
 | `young_destination` | conta de destino com 7 dias (menos de 30) e valor ≥ R$ 500: +2 |
 | `new_payee` | primeiro Pix para esse destinatário, valor ≥ R$ 1.000: +1 |
 | `high_value_review`, `destination_type_amount`, `burst`, `rolling_24h_total` | rodam com o limite fixo (sem histórico) e não disparam |
 | `amount_vs_median`, `new_device`, `impossible_travel` | puladas por falta de histórico |
 
-Pontuação 5, entre 3 e 7: **`two_factor_required`**.
+Pontuação 3, entre 3 e 7: **`two_factor_required`**.
 
-**Reprovado por pontuação.** R$ 12.000,00 às 2h30, de um CPF com 20 Pix anteriores para outras pessoas físicas (mediana R$ 300, escala ≈ R$ 255), dispositivo inédito, para um CPF com conta de 3 dias que recebeu de 6 pagadores diferentes nas últimas 24h, primeiro Pix para ele:
+**Reprovado por pontuação.** R$ 12.000,00 às 14h30, de um CPF com 20 Pix anteriores para outras pessoas físicas (mediana R$ 300, escala ≈ R$ 255), dispositivo inédito, para um CPF com conta de 3 dias que recebeu de 6 pagadores diferentes nas últimas 24h, primeiro Pix para ele:
 
 | Regra | Pontos |
 |---|---|
-| `night_over_limit` | +2 |
 | `destination_type_amount` (limite aprendido para CPFs ≈ R$ 1.070, piso R$ 1.000) | +3 |
 | `amount_vs_median` (limite aprendido ≈ R$ 1.070) | +2 |
 | `new_device` | +2 |
@@ -416,7 +415,7 @@ Pontuação 5, entre 3 e 7: **`two_factor_required`**.
 | `mule_fan_in` | +3 |
 | `high_value_review` e `rolling_24h_total` (nível crítico) | exigem 2FA, 0 pontos |
 
-Pontuação 16, acima de 8: **`rejected`**. As exigências de 2FA também dispararam, mas a rejeição por pontuação tem prioridade, porque há evidência forte de fraude além do valor.
+Pontuação 14, acima de 8: **`rejected`**. As exigências de 2FA também dispararam, mas a rejeição por pontuação tem prioridade, porque há evidência forte de fraude além do valor.
 
 **2FA forçado, com histórico.** R$ 8.000,00 às 15h de um CPF com 30 Pix nos últimos 90 dias (mediana R$ 400, escala ≈ R$ 222), para um destinatário CPF que ele já pagou antes, dispositivo habitual:
 
@@ -442,12 +441,10 @@ Todo Pix analisado devolve, junto do `status`, o porquê. Cada regra que disparo
   "key": "b3f1c2e0-7d4a-4c1e-9a52-1f0e6c9d2a77",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "7",
-    "score": 5,
+    "engine_version": "8",
+    "score": 3,
     "thresholds": { "two_factor": 3, "reject": 8, "warn_z": 3.0, "critical_z": 6.0 },
     "rules_triggered": [
-      { "rule": "night_over_limit",  "points": 2, "block": false,
-        "reason": "Pix de R$ 1.500,00 às 22:15, acima do limite noturno de R$ 1.000,00 (20h às 6h)." },
       { "rule": "young_destination", "points": 2, "block": false,
         "reason": "Conta de destino aberta há 7 dias (menos de 30) e valor de R$ 1.500,00." },
       { "rule": "new_payee",         "points": 1, "block": false,
@@ -471,7 +468,7 @@ Quando uma regra exige 2FA (`high_value_review` ou nível crítico de `rolling_2
   "key": "5c0e9a14-3b7d-4f26-8d1e-72a4b6c8e9f0",
   "status": "two_factor_required",
   "metadata": {
-    "engine_version": "7",
+    "engine_version": "8",
     "score": 7,
     "thresholds": { "two_factor": 3, "reject": 8, "warn_z": 3.0, "critical_z": 6.0 },
     "rules_triggered": [
@@ -529,7 +526,7 @@ curl -i -X POST http://localhost:3000/pix/transaction \
   -d '{
     "id": "pix-000123",
     "amount": 150000,
-    "transaction_date": "2026-10-17T22:15:00-03:00",
+    "transaction_date": "2026-10-17T15:15:00-03:00",
     "source_account": {
       "branch": "0001",
       "account_number": "88213",
@@ -607,15 +604,15 @@ Os testes falam com a API por HTTP, como um cliente de verdade, e ficam em `test
 | 5 Pix do mesmo CPF em 10 minutos, sem histórico | o quinto sobe para `two_factor_required` (`burst`, +3, limite fixo 5) |
 | 20 Pix de um CNPJ em 10 minutos, sem histórico | o vigésimo dispara `burst` (+3); o quadragésimo é `rejected` |
 | CNPJ com pico histórico de 30 Pix em 10 minutos envia 45 | `burst` não dispara (limite aprendido de alerta 60); o mesmo CNPJ sem histórico dispararia |
-| R$ 1.200 às 21h para destinatário conhecido | `approved` (só `night_over_limit`, +2) |
-| R$ 1.200 às 21h para destinatário novo | `two_factor_required` (+2 e +1) |
+| R$ 1.200 às 21h para destinatário conhecido | `rejected` (`night_over_limit`, bloqueio imediato) |
+| R$ 1.200 às 21h para destinatário novo | `rejected` (`night_over_limit` bloqueia, mesmo com outros sinais) |
 | 4 Pix de R$ 500 em 20 minutos ao mesmo CPF, sem Pix anteriores a ele | `payee_burst` dispara (+2) |
 | Mesmo cenário, mas o pagador já tinha pago esse CPF semanas antes | `payee_burst` não dispara |
 | 4 Pix de R$ 50 em 20 minutos ao mesmo CPF (soma R$ 200) | `payee_burst` não dispara (abaixo de R$ 1.000 somados) |
 | 6 pagadores diferentes para o mesmo CPF em 24h | `two_factor_required` por `mule_fan_in` |
 | 6 pagadores diferentes para o mesmo CNPJ em 24h | `mule_fan_in` não dispara (empresa) |
 | Pagador e destinatário com o mesmo documento, conta de destino nova | `young_destination` e `payee_burst` puladas |
-| Dois Pix geolocalizados a 400 km de distância com 30 min de diferença | `impossible_travel` dispara (+3) |
+| Dois Pix geolocalizados a 400 km de distância com 30 min de diferença | `impossible_travel` dispara (+3); se também for dispositivo novo, `new_device_impossible_travel` rejeita |
 | Mesmo `id` enviado duas vezes | `201` e depois `200`, mesma `key`, uma linha no banco |
 | `GET` com um `id` que não existe | `404` com `QIT001008` |
 | Sem `INTERNAL-TOKEN` | `403` |

@@ -42,6 +42,7 @@ class PixTransactionRepository:
         lock_keys = {
             f"pix-antifraud:transaction:{transaction_id}",
             payer_lock_key(source_document_number),
+            payer_lock_key(destination_document_number),
             f"pix-antifraud:device:{source_device_id}",
             f"pix-antifraud:payee:{destination_document_number}",
         }

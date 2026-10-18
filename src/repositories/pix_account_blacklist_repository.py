@@ -23,10 +23,10 @@ class PixAccountBlacklistRepository:
 
     def blacklist_account(
         self,
-        source_document_number: str,
+        account_document_number: str,
         triggering_transaction_id: str,
     ) -> None:
-        normalized_document = normalize_document(source_document_number)
+        normalized_document = normalize_document(account_document_number)
         blacklist_entry = (
             self.session.query(PixAccountBlacklist)
             .filter(

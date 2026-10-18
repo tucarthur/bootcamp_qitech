@@ -317,6 +317,8 @@ def test_night_rule_uses_sao_paulo_time_and_cpf_only():
     night = NOW.replace(hour=1)
     result = analyze(transaction(transaction_date=night, amount=100_001), [], POLICY)
     assert triggered(result)["night_over_limit"]["points"] == 2
+    assert triggered(result)["night_over_limit"]["block"] is True
+    assert result["status"] == "rejected"
     cnpj_payer = transaction(
         transaction_date=night,
         amount=100_001,
@@ -335,9 +337,10 @@ def test_score_thresholds_select_two_factor_and_rejection():
         amount=100_001,
         transaction_date=NOW.replace(hour=20),
     )
-    two_factor = analyze(night_transaction, [], POLICY)
-    assert two_factor["metadata"]["score"] == 3
-    assert two_factor["status"] == "two_factor_required"
+    night_rejection = analyze(night_transaction, [], POLICY)
+    assert night_rejection["metadata"]["score"] >= POLICY.night_points
+    assert triggered(night_rejection)["night_over_limit"]["block"] is True
+    assert night_rejection["status"] == "rejected"
 
     with_new_device = [
         previous(
@@ -358,6 +361,62 @@ def test_score_thresholds_select_two_factor_and_rejection():
     )
     assert rejected["metadata"]["score"] >= POLICY.reject_score
     assert rejected["status"] == "rejected"
+
+
+def test_new_device_and_impossible_travel_together_hard_reject_without_points():
+    history = [
+        previous(
+            minutes=index + 1,
+            source_device_id=f"old-{index}",
+            source_latitude=-23.56,
+            source_longitude=-46.65,
+        )
+        for index in range(POLICY.new_device_min_history)
+    ]
+
+    result = analyze(
+        transaction(
+            amount=POLICY.new_device_min_amount_cents,
+            source_latitude=40.71,
+            source_longitude=-74.01,
+        ),
+        history,
+        POLICY,
+    )
+
+    rules = triggered(result)
+    assert "new_device" in rules
+    assert "impossible_travel" in rules
+    assert rules["new_device_impossible_travel"]["block"] is True
+    assert rules["new_device_impossible_travel"]["points"] == 0
+    assert result["status"] == "rejected"
+
+
+def test_new_device_impossible_travel_subrule_requires_both_signals():
+    history = [
+        previous(
+            minutes=index + 1,
+            source_device_id=f"old-{index}",
+            source_latitude=-23.56,
+            source_longitude=-46.65,
+        )
+        for index in range(POLICY.new_device_min_history)
+    ]
+
+    existing_device = analyze(
+        transaction(
+            amount=POLICY.new_device_min_amount_cents,
+            source_device_id="old-0",
+            source_latitude=40.71,
+            source_longitude=-74.01,
+        ),
+        history,
+        POLICY,
+    )
+
+    assert "impossible_travel" in triggered(existing_device)
+    assert "new_device" not in triggered(existing_device)
+    assert "new_device_impossible_travel" not in triggered(existing_device)
 
 
 def test_burst_has_exclusive_step_and_rejection_tiers():
