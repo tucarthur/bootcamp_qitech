@@ -11,10 +11,16 @@ from tests.utils.db_utils import DbUtils
 def pix_transaction_payload() -> dict:
     payer_digits = f"{uuid4().int % 10**11:011d}"
     payee_digits = f"{uuid4().int % 10**11:011d}"
+    transaction_date = datetime.now(timezone(timedelta(hours=-3))).replace(
+        hour=14,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
     return {
         "id": f"pix-{uuid4()}",
         "amount": 150000,
-        "transaction_date": datetime.now(timezone.utc).isoformat(),
+        "transaction_date": transaction_date.isoformat(),
         "source_account": {
             "branch": "0001",
             "account_number": "88213",
@@ -57,12 +63,13 @@ class TestPixTransactionCreate:
 
         assert status == 201
         assert response["status"] == "two_factor_required"
-        assert response["metadata"]["engine_version"] == "4"
+        assert response["metadata"]["engine_version"] == "5"
         assert response["metadata"]["score"] == 3
         assert response["metadata"]["thresholds"] == {
             "two_factor": 3,
             "reject": 8,
-            "high_value_review_amount": 5_000_000,
+            "warn_z": 3.0,
+            "critical_z": 6.0,
         }
         assert [item["rule"] for item in response["metadata"]["rules_triggered"]] == [
             "young_destination",
@@ -113,9 +120,13 @@ class TestPixTransactionCreate:
         payer_document = first["source_account"]["owner"]["document_number"]
         device_id = first["source"]["device_id"]
         payloads = []
-        for _ in range(10):
+        for index in range(10):
             payload = pix_transaction_payload()
             payload["amount"] = 1_000
+            payload["transaction_date"] = (
+                datetime.fromisoformat(payload["transaction_date"])
+                + timedelta(seconds=index)
+            ).isoformat()
             payload["source_account"]["owner"]["document_number"] = payer_document
             payload["source"]["device_id"] = device_id
             payloads.append(payload)

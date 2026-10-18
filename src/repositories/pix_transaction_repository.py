@@ -4,7 +4,7 @@ from decimal import Decimal
 from database import Context
 from models import PixTransaction
 from models.pix_transaction_analysis import PixTransactionAnalysis
-from sqlalchemy import and_, or_, text
+from sqlalchemy import and_, case, or_, text
 
 from controllers.antifraud import POLICY, TransactionData
 
@@ -42,7 +42,7 @@ class PixTransactionRepository:
 
     def get_history_for_analysis(self, transaction: TransactionData) -> list[TransactionData]:
         history_cutoff = transaction.transaction_date - timedelta(
-            days=POLICY.amount_median_window_days
+            days=POLICY.history_window_days
         )
         recent_history = and_(
             PixTransaction.transaction_date >= history_cutoff,
@@ -69,8 +69,33 @@ class PixTransactionRepository:
                 PixTransaction.transaction_date < transaction.transaction_date,
                 or_(recent_history, all_time_payee_history),
             )
+            .order_by(
+                case(
+                    (
+                        PixTransaction.source_document_number
+                        == transaction.source_document_number,
+                        0,
+                    ),
+                    else_=1,
+                )
+            )
+            .order_by(
+                case(
+                    (
+                        and_(
+                            PixTransaction.source_document_number
+                            == transaction.source_document_number,
+                            PixTransaction.destination_document_number
+                            == transaction.destination_document_number,
+                        ),
+                        0,
+                    ),
+                    else_=1,
+                )
+            )
             .order_by(PixTransaction.transaction_date.desc())
             .order_by(PixTransaction.id.desc())
+            .limit(POLICY.history_max_rows)
             .all()
         )
         return [
