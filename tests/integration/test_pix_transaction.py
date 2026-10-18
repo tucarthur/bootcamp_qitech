@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import create_engine, text
 
@@ -52,6 +53,11 @@ def pix_transaction_payload() -> dict:
 class TestPixTransactionCreate:
     def test_creates_transaction_and_analysis(self):
         payload = pix_transaction_payload()
+        payload["transaction_date"] = (
+            datetime.now(ZoneInfo("America/Sao_Paulo"))
+            .replace(hour=12, minute=0, second=0, microsecond=0)
+            .isoformat()
+        )
 
         status, response = RequestGenerator.POST_pix_transaction(payload)
 
