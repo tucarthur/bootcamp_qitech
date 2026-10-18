@@ -200,6 +200,25 @@ class TestPixTransactionCreate:
         assert status == 422
         assert response["code"] == "QIT001009"
 
+    def test_refuses_timestamps_without_timezone(self):
+        timestamp_fields = [
+            ("transaction_date",),
+            ("source_account", "opening_date"),
+            ("destination_account", "opening_date"),
+        ]
+
+        for field_path in timestamp_fields:
+            payload = pix_transaction_payload()
+            value = payload
+            for field in field_path[:-1]:
+                value = value[field]
+            value[field_path[-1]] = "2026-10-17T12:00:00"
+
+            status, response = RequestGenerator.POST_pix_transaction(payload)
+
+            assert status == 422, f"{'.'.join(field_path)} should require a timezone"
+            assert response["code"] == "QIT001009"
+
     def test_accepts_event_timestamp_outside_previous_five_minute_limit(self):
         for offset in (timedelta(minutes=-6), timedelta(minutes=6)):
             payload = pix_transaction_payload()

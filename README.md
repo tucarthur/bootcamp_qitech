@@ -633,6 +633,30 @@ de um framework para outro, e nenhum teste precisou mudar.** Quando o
 teste descreve o combinado em vez de descrever o código, ele sobrevive à
 reforma.
 
+### Medir os cenários PIX
+
+Com a API e o banco de pé, rode os 16 cenários de sanity check do README
+atualizado 100 vezes cada:
+
+```bash
+python scripts/benchmark_pix_sanity_scenarios.py
+```
+
+O wrapper mede cada chamada HTTP do início ao recebimento da resposta,
+incluindo API, banco e rede. O CSV `results/pix_sanity_timings.csv` tem
+uma linha por chamada, com cenário, iteração, resultado, status esperado
+e duração em milissegundos. Chamadas que preparam histórico também são
+registradas; IDs únicos mantêm as iterações independentes. O script não
+apaga dados do banco. Para escolher outro endereço, quantidade de
+iterações ou arquivo de saída:
+
+```bash
+python scripts/benchmark_pix_sanity_scenarios.py \
+  --base-url http://localhost:3000 \
+  --iterations 100 \
+  --output results/pix_sanity_timings.csv
+```
+
 ## 3. Quando dá errado
 
 Os tropeços mais comuns, com a mensagem que você vai ver:
