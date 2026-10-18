@@ -1,7 +1,12 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from controllers.antifraud import POLICY, TransactionData, analyze
+from controllers.antifraud import (
+    POLICY,
+    ContextHistoryCounts,
+    TransactionData,
+    analyze,
+)
 
 
 NOW = datetime(2026, 10, 17, 12, 0, tzinfo=timezone(timedelta(hours=-3)))
@@ -88,6 +93,23 @@ def test_blacklisted_account_is_rejected_and_reports_authentication_requirement(
     assert blacklist_rule["points"] == 0
     assert blacklist_rule["requires_authentication"] is True
     assert "high_value_review" in triggered(result)
+
+
+def test_sql_context_counts_drive_mule_fan_in_and_shared_device_rules():
+    result = analyze(
+        transaction(),
+        [],
+        POLICY,
+        context_history_counts=ContextHistoryCounts(
+            distinct_payee_payers=POLICY.mule_fan_in_block_count - 1,
+            distinct_device_payers=POLICY.shared_device_min_payers - 1,
+        ),
+    )
+
+    rules = triggered(result)
+    assert result["status"] == "rejected"
+    assert rules["mule_fan_in"]["block"] is True
+    assert rules["shared_device"]["points"] == POLICY.shared_device_points
 
 
 def test_destination_amount_threshold_depends_on_document_type():

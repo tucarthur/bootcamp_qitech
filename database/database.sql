@@ -201,3 +201,9 @@ CREATE TABLE pix_account_blacklist (
     blacklisted_at                   TIMESTAMPTZ NOT NULL DEFAULT CLOCK_TIMESTAMP(),
     authenticated_at                 TIMESTAMPTZ
 );
+
+CREATE TABLE pix_payer_behavior_profile (
+    source_document_number           VARCHAR(14) PRIMARY KEY,
+    history_snapshot                 BYTEA NOT NULL,
+    updated_at                       TIMESTAMPTZ NOT NULL DEFAULT CLOCK_TIMESTAMP()
+);

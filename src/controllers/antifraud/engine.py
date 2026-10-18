@@ -28,12 +28,19 @@ class TransactionData:
     status: str | None = None
 
 
+@dataclass(frozen=True)
+class ContextHistoryCounts:
+    distinct_payee_payers: int
+    distinct_device_payers: int
+
+
 def analyze(
     transaction: TransactionData,
     history: list[TransactionData],
     policy: AntifraudPolicy,
     *,
     account_blacklisted: bool = False,
+    context_history_counts: ContextHistoryCounts | None = None,
 ) -> dict:
     now = transaction.transaction_date
     if now.utcoffset() is None:
@@ -585,15 +592,18 @@ def analyze(
         skip("mule_fan_in", "Pagador e destinatario sao o mesmo documento.")
     elif destination_kind == "cpf":
         fan_in_window = timedelta(hours=policy.mule_fan_in_window_hours)
-        payer_documents = {
-            item.source_document_number
-            for item in recent
-            if item.destination_document_number
-            == transaction.destination_document_number
-            and in_window(item, fan_in_window)
-        }
-        payer_documents.add(transaction.source_document_number)
-        fan_in_count = len(payer_documents)
+        if context_history_counts is None:
+            payer_documents = {
+                item.source_document_number
+                for item in recent
+                if item.destination_document_number
+                == transaction.destination_document_number
+                and in_window(item, fan_in_window)
+            }
+            payer_documents.add(transaction.source_document_number)
+            fan_in_count = len(payer_documents)
+        else:
+            fan_in_count = context_history_counts.distinct_payee_payers + 1
         if fan_in_count >= policy.mule_fan_in_block_count:
             trigger(
                 "mule_fan_in",
@@ -618,13 +628,19 @@ def analyze(
         if item.source_device_id == transaction.source_device_id
         and in_window(item, shared_window)
     }
-    device_documents.add(transaction.source_document_number)
-    if len(device_documents) >= policy.shared_device_min_payers:
+    if context_history_counts is None:
+        device_documents.add(transaction.source_document_number)
+        shared_device_payer_count = len(device_documents)
+    else:
+        shared_device_payer_count = (
+            context_history_counts.distinct_device_payers + 1
+        )
+    if shared_device_payer_count >= policy.shared_device_min_payers:
         trigger(
             "shared_device",
             policy.shared_device_points,
             f"Dispositivo {transaction.source_device_id} foi usado por "
-            f"{len(device_documents)} documentos de pagadores distintos em 24 horas.",
+            f"{shared_device_payer_count} documentos de pagadores distintos em 24 horas.",
         )
 
     if blocked or score >= policy.reject_score:

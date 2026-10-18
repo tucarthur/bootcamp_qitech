@@ -85,7 +85,16 @@ class TestPixTransactionCreate:
                         """
                         SELECT
                             (SELECT count(*) FROM pix_transaction WHERE id = :transaction_id),
-                            (SELECT count(*) FROM pix_analysis WHERE transaction_id = :transaction_id)
+                            (SELECT count(*) FROM pix_analysis WHERE transaction_id = :transaction_id),
+                            (
+                                SELECT octet_length(history_snapshot)
+                                FROM pix_payer_behavior_profile
+                                WHERE source_document_number = (
+                                    SELECT source_document_number
+                                    FROM pix_transaction
+                                    WHERE id = :transaction_id
+                                )
+                            )
                         """
                     ),
                     {"transaction_id": payload["id"]},
@@ -102,7 +111,8 @@ class TestPixTransactionCreate:
                 ).one()
         finally:
             engine.dispose()
-        assert counts == (1, 1)
+        assert counts[:2] == (1, 1)
+        assert counts[2] > 0
         assert timestamps.received_at.utcoffset() is not None
         assert timestamps.received_at != timestamps.transaction_date
 

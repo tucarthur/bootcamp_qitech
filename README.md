@@ -21,7 +21,7 @@ POST /pix/transaction
    ├─ 2. as datas precisam ter fuso e existir ........... inválida → 422
    ├─ 3. esse `id` já foi analisado? .................... sim → devolve a análise gravada (200)
    ├─ 4. grava a transação (documentos só com dígitos)
-   ├─ 5. busca o histórico necessário (poucas consultas, com índice)
+   ├─ 5. carrega o perfil compacto do pagador e busca contexto indexado
    ├─ 6. roda as 14 regras e verifica o blacklist da conta
    ├─ 7. calcula a decisão (ver "Como as regras viram decisão")
    ├─ 8. em caso de rejeição, ativa o blacklist na mesma transação do banco
@@ -58,11 +58,12 @@ GET /pix/transaction/{id}   →   devolve a análise que foi gravada
 
 ### Banco de dados
 
-Três tabelas, em `database/database.sql`:
+Quatro tabelas, em `database/database.sql`:
 
 - `pix_transaction`: o que chegou (um registro por `id` de Pix, com o `id` único). Tem índices para as consultas de histórico: por pagador e data, por destinatário e data, por par pagador-destinatário e por dispositivo e data.
 - `pix_analysis`: o que decidimos (`key` UUID, `status` e `metadata` em JSON), uma por transação.
 - `pix_account_blacklist`: estado persistente por documento pagador. Guarda a transação que ativou o bloqueio; `authenticated_at` vazio significa que o bloqueio está ativo.
+- `pix_payer_behavior_profile`: snapshot comprimido e limitado às 500 transações mais recentes de cada pagador, usado para evitar reler o histórico inteiro em cada Pix.
 
 Separar entrada e decisão permite reanalisar um Pix no futuro sem mexer no que foi recebido.
 
@@ -84,6 +85,18 @@ Exemplo do sinal devolvido enquanto o bloqueio está ativo:
 }
 ```
 
+### Desempenho com histórico grande
+
+O histórico bruto (`pix_transaction`) continua sendo a fonte da verdade. Para pagadores ativos, `pix_payer_behavior_profile` mantém um snapshot comprimido de no máximo 500 tentativas; os limites de 90 dias continuam sendo aplicados pelas regras. O perfil é atualizado junto da transação e da análise no mesmo commit, sob o lock do pagador. Assim, uma falha não deixa o cache adiantado ou atrasado em relação à decisão gravada.
+
+No caminho aquecido, o serviço lê esse snapshot em vez de buscar repetidamente o histórico do pagador na tabela grande. Consulta a tabela bruta para relacionamentos antigos com o destinatário atual; para `mule_fan_in` e `shared_device`, o próprio PostgreSQL calcula os números exatos de pagadores distintos na janela de 24 horas, sem carregar essas linhas para Python. No primeiro Pix após a implantação, o perfil é criado a partir do histórico existente; um Pix com timestamp fora de ordem usa o histórico bruto para preservar a decisão correta e mescla o novo evento sem apagar eventos mais recentes do perfil. Eventos tardios passam a influenciar análises futuras, mas não alteram análises já gravadas.
+
+O limite de 500 mantém o trabalho por análise e o tamanho de cada perfil delimitados. Também significa que, como antes, os sinais dependentes de histórico não consideram mais do que 500 tentativas relevantes. A linha do perfil é comprimida para reduzir o custo de armazenar o cache; o conteúdo pode ser descartado e reconstruído preguiçosamente a partir das transações brutas.
+
+Cada análise nova registra no log `lock_wait_ms`, `history_ms`, `history_rows`, `history_source`, `analysis_ms`, `commit_ms` e `total_ms`, sem incluir documentos ou outros dados do cliente. `history_source` é `cold`, `profile` ou `out_of_order_fallback`. Esses tempos permitem comparar p95/p99 e identificar se o gargalo é lock, banco, motor ou commit antes de escolher novas otimizações. As demais regras continuam calculando em memória sobre o conjunto limitado; novos agregados SQL só devem ser acrescentados quando as medições mostrarem que o cálculo do motor é o próximo gargalo.
+
+Quando um perfil precisar ser invalidado, remova a linha correspondente de `pix_payer_behavior_profile`; a próxima análise daquele pagador fará a carga fria e o reconstruirá. O banco não precisa ser apagado. Particionamento da tabela bruta fica deliberadamente adiado até que os planos `EXPLAIN (ANALYZE, BUFFERS)` e as métricas indiquem que os índices e o perfil já não são suficientes.
+
 ### Onde está o código
 
 ```
@@ -94,6 +107,7 @@ src/controllers/antifraud/                  o motor e as regras (sem acesso a ba
 src/controllers/antifraud/limits.py         escala robusta, limite aprendido e escolha entre limite aprendido e fixo
 src/controllers/antifraud/constants.py      todos os parâmetros
 src/repositories/pix_transaction_repository.py  consultas, inclusive as de histórico
+src/models/pix_payer_behavior_profile.py    perfil comprimido e limitado do pagador
 src/dtos/pix_analysis_dto.py                devolve só key, status e metadata
 ```
 
@@ -494,12 +508,14 @@ docker compose up
 
 Quando aparecer `Application startup complete`, a API está em <http://localhost:3000>. Não precisa criar nenhum arquivo antes: os valores padrão estão no `docker-compose.yml`.
 
-Mudou o `database/database.sql`? Esse arquivo só roda quando o banco nasce, então recrie o banco:
+O `database/database.sql` roda quando o banco nasce. Em uma instalação existente, aplique a migração aditiva do perfil sem apagar as transações:
 
-```bash
-docker compose down -v
-docker compose up
+```powershell
+Get-Content -Raw database/migrations/001_pix_payer_behavior_profile.sql |
+  docker compose exec -T db psql -U bootcamp -d bootcamp
 ```
+
+Faça backup antes de mudanças de schema em ambientes com dados importantes. O perfil começa a ser preenchido automaticamente à medida que cada pagador volta a transacionar.
 
 ### Mandar um Pix
 
