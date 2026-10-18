@@ -103,6 +103,9 @@ class AntifraudPolicy:
     payee_burst_strong_count: dict[str, int] = field(
         default_factory=lambda: {"cpf": 5, "cnpj": 10}
     )
+    payee_burst_min_history_windows: int = 5
+    payee_burst_average_warn_factor: float = 2.0
+    payee_burst_average_strong_factor: float = 4.0
     payee_burst_warn_points: int = 2
     payee_burst_strong_points: int = 3
 

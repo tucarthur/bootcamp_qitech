@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from math import ceil
+from math import ceil, floor
 from statistics import median
 
 
@@ -73,4 +73,30 @@ def learned_burst_thresholds(
         max(warn_floor, ceil(warn_factor * peak)),
         max(block_floor, ceil(block_factor * peak)),
         "history",
+    )
+
+
+def average_window_thresholds(
+    timestamps: list[datetime],
+    window: timedelta,
+    minimum_windows: int,
+    fixed: tuple[int, int],
+    warn_factor: float,
+    strong_factor: float,
+) -> tuple[int, int, str, float | None]:
+    window_seconds = window.total_seconds()
+    window_counts: dict[int, int] = {}
+    for timestamp in timestamps:
+        window_index = floor(timestamp.timestamp() / window_seconds)
+        window_counts[window_index] = window_counts.get(window_index, 0) + 1
+
+    if len(window_counts) < minimum_windows:
+        return fixed[0], fixed[1], "fixed", None
+
+    average_count = sum(window_counts.values()) / len(window_counts)
+    return (
+        max(fixed[0], ceil(warn_factor * average_count)),
+        max(fixed[1], ceil(strong_factor * average_count)),
+        "history_average",
+        average_count,
     )

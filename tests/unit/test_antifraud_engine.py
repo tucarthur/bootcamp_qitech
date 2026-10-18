@@ -700,7 +700,10 @@ def test_payee_burst_counts_attempts_and_requires_unfamiliar_payee():
         POLICY,
     )
 
-    assert triggered(result)["payee_burst"]["points"] == POLICY.payee_burst_warn_points
+    payee_burst = triggered(result)["payee_burst"]
+    assert payee_burst["points"] == POLICY.payee_burst_warn_points
+    assert payee_burst["basis"] == "fixed"
+    assert payee_burst["limit"] == POLICY.payee_burst_warn_count["cpf"]
 
     learned_relationship = previous(
         minutes=60,
@@ -732,6 +735,62 @@ def test_payee_burst_counts_attempts_and_requires_unfamiliar_payee():
         POLICY,
     )
     assert "payee_burst" not in triggered(below_sum)
+
+
+def test_payee_burst_raises_threshold_using_average_prior_pair_windows():
+    destination = "98765432100"
+    historical_attempts = [
+        previous(
+            minutes=31 + 30 * window_index + attempt_index,
+            amount=50_000,
+            destination_document_number=destination,
+            status="rejected",
+            id=f"payee-average-{window_index}-{attempt_index}",
+        )
+        for window_index in range(POLICY.payee_burst_min_history_windows)
+        for attempt_index in range(2)
+    ]
+    current_window_attempts = [
+        previous(
+            minutes=index + 1,
+            amount=50_000,
+            destination_document_number=destination,
+            id=f"payee-current-window-{index}",
+        )
+        for index in range(4)
+    ]
+
+    result = analyze(
+        transaction(amount=50_000, destination_document_number=destination),
+        [*historical_attempts, *current_window_attempts],
+        POLICY,
+    )
+
+    rule = triggered(result)["payee_burst"]
+    assert rule["points"] == POLICY.payee_burst_warn_points
+    assert rule["basis"] == "history_average"
+    assert rule["limit"] == 4
+    assert "media historica de 2.00 tentativas por janela" in rule["reason"]
+
+    strong_current_attempts = [
+        previous(
+            minutes=index + 1,
+            amount=50_000,
+            destination_document_number=destination,
+            id=f"payee-strong-current-window-{index}",
+        )
+        for index in range(7)
+    ]
+    strong_result = analyze(
+        transaction(amount=50_000, destination_document_number=destination),
+        [*historical_attempts, *strong_current_attempts],
+        POLICY,
+    )
+
+    strong_rule = triggered(strong_result)["payee_burst"]
+    assert strong_rule["points"] == POLICY.payee_burst_strong_points
+    assert strong_rule["basis"] == "history_average"
+    assert strong_rule["limit"] == 8
 
 
 def test_payee_burst_has_strong_tier_and_higher_cnpj_count():

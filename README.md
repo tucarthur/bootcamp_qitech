@@ -100,7 +100,7 @@ As regras marcadas com *(aprende)* calculam o limite a partir do histórico do p
 | `impossible_travel` *(perfil)* | Dois Pix do mesmo pagador em lugares tão distantes que o deslocamento seria impossível. | Pix anterior com geolocalização nas últimas 24h; distância ≥ 100 km; velocidade > 900 km/h; **+3**. | Indica que a sessão ou o dispositivo não são da mesma pessoa. O piso de 100 km evita falso alarme por imprecisão de GPS. |
 | `young_destination` *(contraparte)* | A conta que recebe foi aberta há pouco tempo. | Valor ≥ R$ 500; idade < 7 dias **+3**; idade < 30 dias **+2**. | Contas de laranja são abertas pouco antes de serem usadas. Quanto mais nova, maior o risco. |
 | `new_payee` *(contraparte)* | Primeira vez que este pagador paga este destinatário. | Valor ≥ R$ 1.000; **+1**. | Sinal fraco: serve de desempate junto com outros. Sozinho não incomoda ninguém. |
-| `payee_burst` *(contraparte)* | Muitos pagamentos do pagador ao mesmo destinatário, em pouco tempo, **sem relacionamento anterior** entre os dois. | Janela 30 min; soma na janela ≥ R$ 1.000; destinatário **CPF**: ≥ 3 Pix **+2**, ≥ 5 Pix **+3**; destinatário **CNPJ**: ≥ 5 Pix **+2**, ≥ 10 Pix **+3**. Não dispara se o pagador já tinha Pix efetivos para esse destinatário **antes** da janela. | É o padrão de quem está sendo induzido a pagar várias vezes a um desconhecido (golpe do falso pagamento, falsa central). A conta de destino não precisa ser nova: o que importa é que o pagador não tem história com ela. Quem paga uma empresa várias vezes seguidas (compras no mesmo dia) é mais comum, por isso o limiar é maior para CNPJ. O piso de R$ 1.000 evita alerta por rachar uma conta de restaurante. |
+| `payee_burst` *(contraparte)* | Muitos pagamentos do pagador ao mesmo destinatário, em pouco tempo, **sem relacionamento anterior** entre os dois. | Janela 30 min; soma na janela ≥ R$ 1.000. Os mínimos CPF (3 / 5) e CNPJ (5 / 10) sobem para 2× / 4× a média de tentativas por janela histórica ativa quando há pelo menos 5 janelas anteriores; os mínimos fixos continuam como piso. Não dispara se o pagador já tinha Pix efetivos para esse destinatário **antes** da janela. | É o padrão de quem está sendo induzido a pagar várias vezes a um desconhecido (golpe do falso pagamento, falsa central). A conta de destino não precisa ser nova: o que importa é que o pagador não tem história com ela. Quem paga uma empresa várias vezes seguidas (compras no mesmo dia) é mais comum, por isso o limiar é maior para CNPJ. O piso de R$ 1.000 evita alerta por rachar uma conta de restaurante. |
 | `mule_fan_in` *(contraparte)* | Um CPF recebe de muitos pagadores diferentes em pouco tempo. | Destinatário CPF; janela 24h; ≥ 5 pagadores distintos **+3**; ≥ 10 **bloqueio**. | É o desenho de uma conta de laranja: junta dinheiro de várias vítimas. Só vale para CPF, porque uma empresa (CNPJ) recebe de muita gente legitimamente. |
 | `shared_device` *(contexto)* | O mesmo dispositivo é usado por vários pagadores diferentes. | Janela 24h; ≥ 3 pagadores distintos (contando o atual); **+3**. | Indica uma "fazenda de dispositivos" ou uma quadrilha operando várias contas do mesmo aparelho. |
 
@@ -117,7 +117,7 @@ As regras marcadas com *(aprende)* calculam o limite a partir do histórico do p
 
 **Passo a passo (igual para todas as regras que aprendem):**
 
-1. O repositório carrega, em **uma consulta** (índice por pagador e data), os Pix efetivos do pagador nos últimos 90 dias, no máximo 500 linhas, com data, valor, documento do destinatário e dispositivo.
+1. O repositório carrega, em **uma consulta** (índice por pagador e data), até 500 linhas do histórico recente do pagador, com data, valor, status, documento do destinatário e dispositivo. Isso permite que regras de velocidade usem todas as tentativas, enquanto regras de perfil usam apenas movimentações efetivas.
 2. Cada regra monta a sua **base** a partir dessas linhas (tabela abaixo).
 3. Se a base tem amostras suficientes, o **limite aprendido** vale: `limite = max(piso, limite aprendido)`. No `metadata`, `basis = "history"`.
 4. Se não tem, vale o **limite fixo** do tipo correspondente. No `metadata`, `basis = "fixed"`.
@@ -129,6 +129,7 @@ As regras marcadas com *(aprende)* calculam o limite a partir do histórico do p
 | `high_value_review` | valores dos Pix do pagador | 5 Pix | mediana + 6 × escala | teto fixo por destinatário |
 | `destination_type_amount` | valores dos Pix do pagador **para o mesmo tipo de destinatário** | 5 Pix daquele tipo | mediana + 3 × escala | valor fixo por destinatário |
 | `burst` | pico de Pix em 10 minutos | 10 Pix | alerta 2 × pico; bloqueio 4 × pico | valores fixos por pagador |
+| `payee_burst` | média de tentativas do mesmo par pagador-destinatário em janelas ativas de 30 minutos | 5 janelas ativas | alerta 2 × média; nível forte 4 × média | contagens fixas por destinatário |
 | `rolling_24h_total` | total por dia ativo | 5 dias ativos | mediana + 3 × escala (alerta); mediana + 6 × escala (crítico) | valores fixos por pagador |
 
 **A escala robusta.** Em vez de média e desvio padrão (que um único Pix grande distorce), usamos a mediana e o MAD:
@@ -160,6 +161,10 @@ def burst_peak(timestamps, window_minutes):
     # maior número de Pix em qualquer janela de 10 min (duas pontas, O(n))
     ...
 
+def average_window_count(timestamps, window_minutes):
+    # média de tentativas nas janelas fixas de 30 min que tiveram tentativas
+    ...
+
 def resolve(rule, kind, history):
     learned = rule.learn(history)            # None se faltar amostra
     if learned is None:
@@ -177,7 +182,7 @@ Esta parte existe para que não reste dúvida de como cada regra é calculada. Q
 
 **Falta de histórico.** Toda regra que depende de histórico tem um mínimo de amostras. Se não chega a ele:
 
-- as regras que aprendem (`high_value_review`, `destination_type_amount`, `burst`, `rolling_24h_total`) **voltam ao limite fixo** e registram `basis = "fixed"`;
+- as regras que aprendem (`high_value_review`, `destination_type_amount`, `burst`, `payee_burst`, `rolling_24h_total`) **voltam ao limite fixo** e registram `basis = "fixed"`;
 - as regras sem versão fixa (`amount_vs_median`, `new_device`, `impossible_travel`) **não rodam** e registram o motivo em `rules_skipped`. Elas não aprovam nem reprovam em silêncio.
 
 Isso evita punir quem acabou de chegar: o primeiro Pix de qualquer pagador é julgado pelos valores fixos e pelas regras que não precisam de passado.
@@ -203,7 +208,7 @@ Isso evita punir quem acabou de chegar: o primeiro Pix de qualquer pagador é ju
 - `impossible_travel`: precisa de `geolocation` no Pix atual e em algum Pix anterior do pagador nas últimas 24h (usa o mais recente com geolocalização). Distância pela fórmula de haversine. Velocidade = distância ÷ horas entre os dois, com um mínimo de 1 minuto para nunca dividir por zero.
 - `young_destination`: idade = agora − `destination_account.opening_date`. Se a data de abertura for **posterior** a agora (dado inconsistente), a idade é tratada como zero, ou seja, a faixa mais arriscada. Aplica **uma** faixa só: a de < 7 dias ou a de < 30 dias, nunca as duas.
 - `new_payee`: dispara se o pagador não tem **nenhum** Pix efetivo anterior para esse documento de destino (inclusive os feitos há poucos minutos) e `amount ≥ R$ 1.000`. Só o primeiro pagamento da sequência dispara.
-- `payee_burst`: conta as tentativas (qualquer decisão) do pagador para o mesmo documento de destino em (agora − 30 min, agora), **incluindo o atual** (`N`), e soma os valores delas (`S`). Primeiro verifica o relacionamento: se o pagador tem algum Pix efetivo para esse destinatário com data **anterior a agora − 30 min** (nos últimos 90 dias), a regra não dispara. Se não tem, e `S ≥ R$ 1.000`: destinatário CPF dispara +2 com `N ≥ 3` e +3 com `N ≥ 5`; destinatário CNPJ dispara +2 com `N ≥ 5` e +3 com `N ≥ 10`. Não depende da idade da conta de destino.
+- `payee_burst`: conta as tentativas (qualquer decisão) do pagador para o mesmo documento de destino em (agora − 30 min, agora), **incluindo o atual** (`N`), e soma os valores delas (`S`). Primeiro verifica o relacionamento: se o pagador tem algum Pix efetivo para esse destinatário com data **anterior a agora − 30 min** (nos últimos 90 dias), a regra não dispara. Se não tem, e `S ≥ R$ 1.000`, usa os mínimos CPF (3 / 5) ou CNPJ (5 / 10). Com pelo menos 5 janelas históricas ativas de 30 min para o mesmo par nos últimos 90 dias, calcula a média de tentativas por janela; os mínimos de alerta e forte passam a ser, respectivamente, `max(mínimo fixo, ceil(2 × média))` e `max(mínimo fixo, ceil(4 × média))`. A média usa intervalos fixos e não sobrepostos, inclui tentativas rejeitadas e exclui intervalos vazios. Com menos de 5 janelas, usa os mínimos fixos. Não depende da idade da conta de destino.
 - `mule_fan_in`: conta documentos de pagador **distintos** que enviaram para o mesmo documento de destino nas últimas 24h, **incluindo o pagador atual**.
 - `shared_device`: conta documentos de pagador distintos que usaram o mesmo `device_id` nas últimas 24h, **incluindo o pagador atual**.
 
@@ -293,6 +298,9 @@ PAYEE_BURST_WINDOW_MINUTES   = 30
 PAYEE_BURST_MIN_TOTAL        = 100_000        # R$ 1.000 somados na janela
 PAYEE_BURST_WARN_COUNT       = {"cpf": 3, "cnpj": 5}                     # +2
 PAYEE_BURST_STRONG_COUNT     = {"cpf": 5, "cnpj": 10}                    # +3
+PAYEE_BURST_MIN_HISTORY_WINDOWS = 5
+PAYEE_BURST_AVERAGE_WARN_FACTOR = 2
+PAYEE_BURST_AVERAGE_STRONG_FACTOR = 4
 PAYEE_BURST_WARN_POINTS      = 2
 PAYEE_BURST_STRONG_POINTS    = 3
 

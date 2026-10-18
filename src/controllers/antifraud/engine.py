@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 from controllers.antifraud.constants import AntifraudPolicy
 from controllers.antifraud.limits import (
     LearnedLimit,
+    average_window_thresholds,
     learned_burst_thresholds,
     resolve_learned_limit,
 )
@@ -504,6 +505,13 @@ def analyze(
         count = len(matching_attempts) + 1
         total = transaction.amount + sum(item.amount for item in matching_attempts)
         relationship_cutoff = now - payee_window
+        historical_payee_attempts = [
+            item
+            for item in payer_attempts
+            if item.destination_document_number
+            == transaction.destination_document_number
+            and history_cutoff <= item.transaction_date <= relationship_cutoff
+        ]
         prior_relationship = any(
             effective(item)
             and item.source_document_number == transaction.source_document_number
@@ -513,21 +521,48 @@ def analyze(
             for item in prior
         )
         if not prior_relationship and total >= policy.payee_burst_min_total_cents:
-            strong_count = policy.payee_burst_strong_count[destination_kind]
-            warn_count = policy.payee_burst_warn_count[destination_kind]
+            (
+                warn_count,
+                strong_count,
+                payee_burst_basis,
+                average_count,
+            ) = average_window_thresholds(
+                timestamps=[
+                    item.transaction_date for item in historical_payee_attempts
+                ],
+                window=payee_window,
+                minimum_windows=policy.payee_burst_min_history_windows,
+                fixed=(
+                    policy.payee_burst_warn_count[destination_kind],
+                    policy.payee_burst_strong_count[destination_kind],
+                ),
+                warn_factor=policy.payee_burst_average_warn_factor,
+                strong_factor=policy.payee_burst_average_strong_factor,
+            )
+            average_description = (
+                f"; media historica de {average_count:.2f} tentativas por janela"
+                if average_count is not None
+                else ""
+            )
             if count >= strong_count:
                 trigger(
                     "payee_burst",
                     policy.payee_burst_strong_points,
                     f"{count} tentativas somando {total} centavos para destinatario "
-                    f"{destination_kind.upper()} sem relacionamento anterior.",
+                    f"{destination_kind.upper()} sem relacionamento anterior"
+                    f"{average_description}.",
+                    basis=payee_burst_basis,
+                    limit=strong_count,
                 )
             elif count >= warn_count:
                 trigger(
                     "payee_burst",
                     policy.payee_burst_warn_points,
                     f"{count} tentativas somando {total} centavos para destinatario "
-                    f"{destination_kind.upper()} sem relacionamento anterior.",
+                    f"{destination_kind.upper()} sem relacionamento anterior"
+                    f"{average_description}.",
+                    basis=payee_burst_basis,
+                    limit=warn_count,
                 )
 
     # 13. Mule fan-in.
